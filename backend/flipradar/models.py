@@ -364,7 +364,7 @@ class AlertRule(Base):
 class Notification(Base):
     __tablename__ = "notifications"
     # AUTOINCREMENT: ids are never reused after the newest rows are deleted (clear-demo, cascades), so a poller's
-    # ``since_id`` cursor never skips a notification.  services/bootstrap.ensure_monotonic_notification_ids
+    # ``since_id`` cursor does not skip notifications.  services/bootstrap.ensure_monotonic_notification_ids
     # rebuilds tables created before this option existed.
     __table_args__ = (
         UniqueConstraint("rule_id", "opportunity_id", name="uq_notification_rule_opp"),
