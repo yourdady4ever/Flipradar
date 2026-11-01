@@ -93,6 +93,7 @@ def _confidence(value: Decimal) -> float:
 
 #: Segment of keys created before storage became mandatory; such clusters mix every capacity.
 LEGACY_STORAGE_UNKNOWN = "storage:unknown"
+_SCREEN_TOKEN = re.compile(r"\d{1,2}in")
 
 
 def missing_identity(attrs: NormalizedAttributes) -> list[str]:
@@ -107,15 +108,17 @@ def missing_identity(attrs: NormalizedAttributes) -> list[str]:
     * a coherent case material (Apple Watch Series: aluminium vs steel/titanium/Hermes).
     """
     model = _norm(attrs.model)
+    tokens = set(attrs.variant_tokens or [])
     reasons: list[str] = []
     if _storage_relevant(attrs.category, model) and not attrs.storage_gb:
         reasons.append("storage not stated (different capacities are different products)")
-    dims = _dims(attrs)
-    if model in V.EDITION_MODELS and "edition" not in dims:
+    # edition / screen are read from the tokens directly so that stored clusters without a category
+    # are judged the same way
+    if model in V.EDITION_MODELS and len(tokens & {"digital", "disc"}) != 1:
         reasons.append("edition (digital or disc) not stated")
-    if V.requires_screen(model) and "screen" not in dims:
+    if V.requires_screen(model) and len({t for t in tokens if _SCREEN_TOKEN.fullmatch(t)}) != 1:
         reasons.append("screen size not stated (this line is sold in several sizes)")
-    if V.material_conflict(model, attrs.variant_tokens or []):
+    if V.material_conflict(model, sorted(tokens)):
         reasons.append("contradictory case materials in the title")
     return reasons
 

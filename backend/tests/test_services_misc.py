@@ -43,7 +43,7 @@ def test_refresh_usd_mxn_chain_and_staleness(db, settings, monkeypatch):
     from flipradar.collectors import fx_sources
     from flipradar.collectors.base import CollectorError
 
-    async def fake_get(s, client=None):
+    async def fake_get(s, client=None, **kwargs):
         return fx_sources.FxQuote(Decimal("18.10"), "2026-10-30", "frankfurter_ecb", "ECB", False)
 
     monkeypatch.setattr(fx_sources, "get_usd_mxn", fake_get)
@@ -116,7 +116,7 @@ def test_scheduler_refreshes_fx_at_most_every_12h(db, settings, monkeypatch):
 
     calls = []
 
-    async def fake_get(s, client=None):
+    async def fake_get(s, client=None, **kwargs):
         calls.append(1)
         return fx_sources.FxQuote(Decimal("18.00"), datetime.now(UTC).date().isoformat(), "banxico_fix", None, True)
 

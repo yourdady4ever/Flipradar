@@ -113,8 +113,8 @@ async def refresh_usd_mxn(
 
     Raises :class:`CollectorError` when every source fails or the returned rate is stale.
     """
-    quote = await fx_sources.get_usd_mxn(settings, client)
     today = today or datetime.now(UTC).date()
+    quote = await fx_sources.get_usd_mxn(settings, client, today=today)
     if not _is_fresh(quote.rate_date, today):
         raise CollectorError(
             f"{quote.source} returned a stale USD/MXN rate dated {quote.rate_date} (older than {MAX_FX_AGE_DAYS} days)"

@@ -260,6 +260,12 @@ PARTS_TERMS = (
     _t("display roto", r"\bdisplay (?:roto|estrellado|quebrado)\b"),
     _t("pantalla rota", r"\bpantalla (?:rota|estrellada|quebrada)\b"),
     _t("for parts", r"\b(?:for parts|parts only)\b"),
+    _t("mojado", r"\b(?:se )?moj(?:o|ado|ada)\b"),
+    _t("falla", r"\b(?:con|tiene|presenta) fallas?\b"),
+    _t("no carga", r"\bno carga\b", negatable=False, conditional_exempt=True),
+    _t("no da imagen", r"\bno da (?:imagen|video)\b", negatable=False, conditional_exempt=True),
+    _t("cracked screen", r"\bcracked (?:screen|display|glass)\b"),
+    _t("not working", r"\b(?:not working|does not (?:power|turn) on|won.?t turn on)\b", negatable=False),
 )
 
 _UNLOCK_WORDS = r"(?:libre|limpi[oa]|desvinculad[oa]|liberad[oa]|desbloquead[oa]|eliminad[oa]|borrad[oa]|removid[oa]|quitad[oa]|free|clean|off|removed)"
@@ -276,6 +282,9 @@ LOCK_TERMS = (
     _t("lista negra", r"\blista negra\b"),
     _t("cuenta google", rf"\bcuenta (?:de )?(?:google|gmail)\b(?![\s:,-]*{_UNLOCK_WORDS})"),
     _t("frp", rf"\bfrp\b(?![\s:,-]*{_UNLOCK_WORDS})"),
+    _t("blacklisted", r"\bblack ?listed\b|\bbad (?:esn|imei)\b"),
+    _t("activation lock", rf"\bactivation lock(?:ed)?\b(?![\s:,-]*{_UNLOCK_WORDS})"),
+    _t("carrier locked english", r"\bcarrier locked\b|\bsim locked\b"),
 )
 
 CARRIER_TERMS = (

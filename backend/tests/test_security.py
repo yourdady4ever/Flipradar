@@ -76,7 +76,8 @@ def test_auth_can_be_disabled(tmp_path):
     from flipradar.main import create_app
 
     app = create_app(make_settings(tmp_path, require_auth=False))
-    with TestClient(app) as c:
+    # Token-less mode only answers local Host headers (DNS-rebinding guard), so use a loopback base URL.
+    with TestClient(app, base_url="http://localhost") as c:
         r = c.get("/api/v1/auth/check")
         assert r.status_code == 200
         assert r.json() == {"ok": True, "token_name": None, "auth_required": False}

@@ -504,3 +504,55 @@ def test_canonical_key_matches_analyze_listing() -> None:
     for title in ("iPhone 15 Pro 256gb", "Galaxy S23 usado", "PS5 Slim Digital 1TB", "iPad Pro M4 256gb"):
         attrs = norm(title)
         assert canonical_key(attrs) == attrs.canonical_key
+
+
+def test_incomplete_stored_clusters_are_not_indexed_even_without_category() -> None:
+    m = ProductMatcher([
+        ProductCandidate("sony|ps5 slim|1024gb|digital", "PS5 Slim Digital 1TB", "sony", "ps5 slim", None, {}),
+        ProductCandidate("sony|ps5 slim|1024gb", "PS5 Slim 1TB", "sony", "ps5 slim", None, {}),
+        ProductCandidate("apple|ipad pro m4|256gb|wifi", "iPad Pro M4 256GB", "apple", "ipad pro m4", None, {}),
+        ProductCandidate("apple|iphone 15|storage:unknown", "iPhone 15", "apple", "iphone 15", None, {}),
+    ])
+    assert len(m) == 1  # only the complete PS5 Slim Digital 1TB cluster can receive listings
+
+
+# ------------------------------------------------------------------------------------------------
+# End to end (real normalizer, matcher and engine): the different, cheaper product never becomes an
+# opportunity priced against the comparables of the product it was confused with.
+# ------------------------------------------------------------------------------------------------
+
+E2E_CASES = [
+    # (finding, comparable title, comparable price, confused title, confused price)
+    ("#0", "AirPods Pro 2 usados", 3200, "AirPods Pro 2 Estuche de carga usado", 1200),
+    ("#0", "Nintendo Switch 2 usado", 8600, "Nintendo Switch 2 Funda Rigida", 3200),
+    ("#2", "Nintendo Switch OLED usado", 5800, "Nintendo Switch V2 Neon usado (no es OLED)", 3700),
+    ("#3", "Samsung Galaxy Tab S9 128gb Wifi usado", 11000, "Samsung Galaxy Tab S9 FE+ 128gb Wifi usado", 6500),
+    ("#4", "iPad Pro M4 13 256gb Wifi usado", 27000, "iPad Pro M4 11 256gb Wifi usado", 18500),
+    ("#5", "iPhone 11 4gb Ram 128gb usado", 6200, "iPhone 11 4gb Ram 64gb usado", 4300),
+    # a 128GB unit whose title omits the capacity, among storage-less listings priced like 256GB units
+    ("#6", "Galaxy S23 usado", 8700, "Galaxy S23 usado excelente estado", 6200),
+    ("#9", "Apple Watch Series 9 45mm Acero Inoxidable usado", 11500, "Apple Watch Series 9 45mm Aluminio usado",
+     6500),
+]
+
+
+@pytest.mark.parametrize(("finding", "comp_title", "comp_price", "title", "price"), E2E_CASES,
+                         ids=[f"{c[0]} {c[3][:30]}" for c in E2E_CASES])
+def test_confused_listing_never_becomes_an_opportunity(db, settings, finding, comp_title, comp_price, title, price):
+    from sqlalchemy import select
+
+    from flipradar.models import Listing, Opportunity
+    from flipradar.services import analysis
+    from flipradar.services.ingestion import ingest_raw_listings
+    from tests.conftest import raw
+
+    items = [raw(f"C{i}", comp_title, comp_price + 25 * i, brand=None, model=None) for i in range(4)]
+    items.append(raw("X", title, price, brand=None, model=None))
+    stats = ingest_raw_listings(db, "manual", items, settings=settings)
+    db.commit()
+    analysis.recompute(db, stats.product_ids_touched, settings=settings, dispatch=False)
+    db.commit()
+    confused = db.scalars(select(Listing).where(Listing.external_id == "X")).one()
+    comparable = db.scalars(select(Listing).where(Listing.external_id == "C0")).one()
+    assert confused.product_id is None or confused.product_id != comparable.product_id, finding
+    assert not [o for o in db.scalars(select(Opportunity)).all() if o.buy_listing.external_id == "X"], finding

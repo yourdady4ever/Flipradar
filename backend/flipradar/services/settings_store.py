@@ -41,6 +41,8 @@ DEFAULTS: dict[str, Callable[[Settings], Any]] = {
     "include_demo_data": lambda s: False,
     "pricing_strategy": lambda s: "competitive",
     "unknown_shipping_assumption_cents": lambda s: None,
+    # A BUY listing not seen within this many days is never an opportunity (it may be gone).
+    "buy_max_age_days": lambda s: 3,
 }
 
 PRICING_STRATEGIES = ("competitive", "market")
@@ -90,6 +92,10 @@ def _validate(key: str, value: Any) -> Any:
         value = int(value)
         if not 1 <= value <= 365:
             raise Invalid("comparable_max_age_days must be within 1..365")
+    elif key == "buy_max_age_days":
+        value = int(value)
+        if not 1 <= value <= 90:
+            raise Invalid("buy_max_age_days must be within 1..90")
     elif key in ("target_roi_bp", "min_roi_bp"):
         value = int(value)
         if not 0 <= value <= 100000:
@@ -148,6 +154,7 @@ def analysis_settings(session: Session, settings: Settings | None = None) -> Ana
         min_profit_cents=int(values["min_profit_cents"]),
         min_roi_bp=int(values["min_roi_bp"]),
         pricing_strategy=str(values["pricing_strategy"]),
+        buy_max_age_days=int(values["buy_max_age_days"]),
         include_demo=bool(values["include_demo_data"]),
         unknown_shipping_assumption_cents=(
             None
