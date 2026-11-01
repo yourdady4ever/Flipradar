@@ -392,11 +392,28 @@ STRONG_ACCESSORY_WORDS: tuple[tuple[str, str], ...] = (
     (r"repuestos?", "spare_part"),
     (r"refaccion(?:es)?", "spare_part"),
     (r"flex", "spare_part"),
+    (r"(?:placa|tarjeta)\s(?:logica|madre|base)", "spare_part"),
+    (r"logic\sboard", "spare_part"),
+    (r"motherboard", "spare_part"),
+    (r"chasis", "spare_part"),
+    (r"izquierd[oa]", "spare_part"),  # a single earbud / Joy-Con side, not the set
+    (r"derech[oa]", "spare_part"),
+    (r"housing", "spare_part"),
     (r"helices?", "spare_part"),  # drone propellers
     (r"propelas?", "spare_part"),
     (r"propellers?", "spare_part"),
     (r"teclado", "keyboard"),
     (r"keyboard", "keyboard"),
+)
+
+#: Parts that carry the device's own specs (a logic board has the storage chip): after the device name
+#: they mean a part listing even when storage or "celular"/"consola" is stated.
+PART_WORDS_ANY_CONTEXT: tuple[str, ...] = (
+    r"(?:placa|tarjeta)\s(?:logica|madre|base)",
+    r"logic\sboard",
+    r"motherboard",
+    r"chasis",
+    r"housing",
 )
 
 #: Weak accessory words: only count when they *lead* the title (before the device name) or when the
@@ -428,6 +445,7 @@ WEAK_ACCESSORY_WORDS: tuple[tuple[str, str], ...] = (
     (r"lapiz", "stylus"),
     (r"pencil", "stylus"),
     (r"stylus", "stylus"),
+    (r"s\s?pen", "stylus"),
     (r"memoria", "memory_card"),
     (r"micro\s?sd", "memory_card"),
     (r"tarjeta\sde\smemoria", "memory_card"),

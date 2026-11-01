@@ -14,7 +14,6 @@ from flipradar.normalize import (
     analyze_listing,
     extract_ram_gb,
     extract_storage_gb,
-    is_bundle,
     normalize_listing,
     normalize_text,
     parse_condition,
@@ -54,6 +53,10 @@ def key(title: str, **kw) -> str | None:
         "PS5 Slim Control",
         "PS5 Control Dualsense",
         "PS5 Dualsense Blanco",
+        "iPad Air M2 11 Funda",  # the screen size before the accessory word is not a quantity
+        "AirPods Pro 2 Audifono derecho",  # a single earbud
+        "Nintendo Switch OLED Memoria 256gb",  # single-configuration model: the size is the card's
+        "iPhone 15 Pro Max 256gb Placa Logica",  # a logic board carries the storage
     ],
 )
 def test_accessory_named_after_the_device_is_an_accessory(title: str) -> None:
@@ -81,6 +84,10 @@ def test_game_named_after_the_console_is_not_clustered(title: str) -> None:
         ("Apple Watch Series 9 45mm GPS Medianoche", "apple|apple watch series 9|45mm,gps"),
         ("iPhone 15 Pro Max 256gb con funda de regalo", "apple|iphone 15 pro max|256gb"),
         ("Canon EOS R50 Lente 18-45mm", "canon|canon eos r50|lens_kit"),
+        ("Nintendo Switch OLED 64GB Blanco", "nintendo|switch oled"),
+        ("Apple Watch Series 9 45mm pantalla impecable", "apple|apple watch series 9|45mm"),
+        ("Kindle Paperwhite 11 bateria al 100", "amazon|kindle paperwhite 11"),
+        ("Echo Show 8 Smart Display", "amazon|echo show 8"),
     ],
 )
 def test_device_listings_describing_their_parts_stay_devices(title: str, expected_key: str) -> None:
@@ -425,8 +432,10 @@ def test_apple_watch_case_material_is_an_identity() -> None:
     plain = norm("Apple Watch Series 9 45mm usado")
     assert steel.canonical_key == "apple|apple watch series 9|45mm,steel"
     assert alu.canonical_key == plain.canonical_key == "apple|apple watch series 9|45mm"
-    assert compare(steel, alu).method == "none"
-    assert any("material differs" in r for r in compare(steel, alu).reasons) or compare(steel, alu).reasons
+    result = compare(steel, alu)
+    assert result.method == "none"
+    assert "case material differs (steel vs aluminum)" in result.reasons
+    assert compare(alu, steel).method == "none"
     assert key("Apple Watch Series 10 46mm Titanio Natural") == "apple|apple watch series 10|46mm,titanium"
     assert key("Apple Watch Series 9 45mm Hermes") == "apple|apple watch series 9|45mm,hermes"
 

@@ -4,8 +4,12 @@ OWNER: normalize/matching agent.
 
 Matching ladder (most to least certain), all deterministic:
 
-1. **GTIN** - identical canonical GTIN and no hard attribute conflict -> confidence 0.99.
-2. **Canonical key** - identical ``brand|model|storage|identity`` key -> 0.95.
+1. **GTIN** - identical canonical GTIN, no hard attribute conflict, and the existing product states every
+   price-relevant attribute the listing states (a vaguer product never absorbs a specific listing) ->
+   confidence 0.99.
+2. **Canonical key** - identical ``brand|model|storage|identity`` key -> 0.95.  Listings that miss a
+   price-relevant attribute (storage, PS5 edition, screen size of multi-size lines...) get no key at all
+   (:func:`missing_identity`), so they never form or join a price cluster.
 3. **Guarded fuzzy** - only when brand and model are equal, nothing conflicts (storage, edition,
    connectivity, sizes, accessory flag/type) -> ``token_set_ratio / 100 * 0.9``, further multiplied by
    0.9 for every attribute stated on one listing only.  Its maximum (0.9) is *below* the default
@@ -188,9 +192,9 @@ def hard_conflicts(a: NormalizedAttributes, b: NormalizedAttributes) -> list[str
     for dim in sorted(set(dims_a) & set(dims_b)):
         if dims_a[dim] != dims_b[dim]:
             reasons.append(f"{V.IDENTITY_LABELS.get(dim, dim)} differs ({dims_a[dim]} vs {dims_b[dim]})")
-    for x, y, dims_x in ((a, b, dims_a), (b, a, dims_b)):
+    for dims_x, y, dims_y in ((dims_a, b, dims_b), (dims_b, a, dims_a)):
         # an explicitly aluminium Apple Watch is never the steel/titanium/Hermes one
-        if "material" in dims_x and "material" not in _dims(y) and "aluminum" in (y.variant_tokens or []):
+        if "material" in dims_x and "material" not in dims_y and "aluminum" in (y.variant_tokens or []):
             reasons.append(f"{V.IDENTITY_LABELS['material']} differs ({dims_x['material']} vs aluminum)")
     return reasons
 

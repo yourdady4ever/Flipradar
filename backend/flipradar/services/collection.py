@@ -176,6 +176,16 @@ def _close_run(
     return touched
 
 
+def _abort_run(session: Session, run: CollectionRun, source: Source | None, exc: Exception) -> None:
+    session.rollback()
+    _finish(run, source, "error", f"could not store the results: {type(exc).__name__}", utcnow())
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+        log.warning("could not mark collection run %s as failed", run.id, exc_info=True)
+
+
 def _record_no_source(session: Session, query: str, tracked_search_id: int | None) -> CollectionRun:
     run = CollectionRun(tracked_search_id=tracked_search_id, query=query[:200], started_at=utcnow(), status="running")
     session.add(run)
@@ -215,7 +225,11 @@ async def run_collection(
         if run.status != "running":  # unknown or disabled source: already finished and committed
             continue
         status, payload = await _fetch(key, query, limit, settings, client)
-        touched |= await asyncio.to_thread(_close_run, session, run, source, key, status, payload, settings)
+        try:
+            touched |= await asyncio.to_thread(_close_run, session, run, source, key, status, payload, settings)
+        except Exception as exc:  # e.g. the database stayed locked: record it, keep going with the others
+            log.exception("storing the results from %s failed", key)
+            await asyncio.to_thread(_abort_run, session, run, source, exc)
 
     result = CollectResult(runs=[run_out(r, k) for r, k in runs])
     if analyze and touched:

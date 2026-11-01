@@ -12,7 +12,13 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
+from .money import MAX_CENTS
+
 API_VERSION = "1"
+# Upper bounds for client-supplied integers: they keep every stored value (and quantity x price) inside
+# SQLite's signed 64-bit INTEGER, so absurd input is a 422 instead of an OverflowError (500).
+MAX_QUANTITY = 100_000
+MAX_ID = 2**63 - 1
 
 T = TypeVar("T")
 
@@ -335,8 +341,8 @@ class OpportunityUpdate(BaseModel):
 
 class OpportunityBuyIn(BaseModel):
     quantity: int = Field(default=1, ge=1, le=1000)
-    unit_cost_cents: int | None = Field(default=None, ge=0)  # default: listing price
-    extra_costs_cents: int | None = Field(default=None, ge=0)  # default: listing shipping (if known)
+    unit_cost_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # default: listing price
+    extra_costs_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # default: listing shipping (if known)
     notes: str | None = Field(default=None, max_length=2000)
 
 
@@ -362,8 +368,8 @@ class RecomputeResult(BaseModel):
 
 
 class FixedFeeTierIO(BaseModel):
-    max_price_cents: int | None = Field(default=None, ge=0)
-    fee_cents: int = Field(ge=0)
+    max_price_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
+    fee_cents: int = Field(ge=0, le=MAX_CENTS)
 
 
 class FeeProfileIn(BaseModel):
@@ -373,11 +379,11 @@ class FeeProfileIn(BaseModel):
     commission_bp: int = Field(default=0, ge=0, le=10000)
     fixed_fee_tiers: list[FixedFeeTierIO] = []
     payment_fee_bp: int = Field(default=0, ge=0, le=10000)
-    payment_fixed_cents: int = Field(default=0, ge=0)
+    payment_fixed_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     iva_on_fees: bool = False
     iva_rate_bp: int = Field(default=1600, ge=0, le=10000)
-    seller_shipping_cents: int = Field(default=0, ge=0)
-    free_shipping_threshold_cents: int | None = Field(default=None, ge=0)
+    seller_shipping_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
+    free_shipping_threshold_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     isr_withholding_bp: int = Field(default=0, ge=0, le=10000)
     iva_withholding_bp: int = Field(default=0, ge=0, le=10000)
     source_url: str | None = Field(default=None, max_length=1000)
@@ -391,15 +397,15 @@ class FeeProfileOut(FeeProfileIn):
 
 
 class CalculatorIn(BaseModel):
-    buy_price_cents: int = Field(ge=0)
-    sale_price_cents: int = Field(ge=0)
+    buy_price_cents: int = Field(ge=0, le=MAX_CENTS)
+    sale_price_cents: int = Field(ge=0, le=MAX_CENTS)
     fee_profile_key: str | None = None
     fee_profile: FeeProfileIn | None = None  # inline profile (overrides fee_profile_key)
-    buy_shipping_cents: int = Field(default=0, ge=0)
-    import_costs_cents: int = Field(default=0, ge=0)
-    other_buy_costs_cents: int = Field(default=0, ge=0)
-    other_sale_costs_cents: int = Field(default=0, ge=0)
-    seller_shipping_override_cents: int | None = Field(default=None, ge=0)
+    buy_shipping_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
+    import_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
+    other_buy_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
+    other_sale_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
+    seller_shipping_override_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     sale_price_includes_iva: bool = True
     treat_withholdings_as_cost: bool = True
     target_roi_bp: int | None = Field(default=None, ge=0, le=100000)
@@ -413,8 +419,8 @@ class CalculatorOut(BaseModel):
 
 
 class ImportCostIn(BaseModel):
-    item_value_usd_cents: int = Field(ge=0)
-    shipping_usd_cents: int = Field(default=0, ge=0)
+    item_value_usd_cents: int = Field(ge=0, le=MAX_CENTS)
+    shipping_usd_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     rule_key: str = "courier_usmca"
     usd_mxn_rate: str | None = None  # decimal string; default = latest stored FX rate
 
@@ -441,17 +447,17 @@ class ImportCostOut(BaseModel):
 class InventoryIn(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     sku: str | None = Field(default=None, max_length=64)
-    product_id: int | None = None
-    opportunity_id: int | None = None
+    product_id: int | None = Field(default=None, ge=1, le=MAX_ID)
+    opportunity_id: int | None = Field(default=None, ge=1, le=MAX_ID)
     condition: Literal["new", "used", "refurbished", "for_parts", "unknown"] = "unknown"
-    quantity: int = Field(default=1, ge=1, le=100000)
-    unit_cost_cents: int = Field(ge=0)
-    extra_costs_cents: int = Field(default=0, ge=0)
+    quantity: int = Field(default=1, ge=1, le=MAX_QUANTITY)
+    unit_cost_cents: int = Field(ge=0, le=MAX_CENTS)
+    extra_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     purchase_source: str | None = Field(default=None, max_length=120)
     purchase_url: str | None = Field(default=None, max_length=1000)
     purchased_at: datetime | None = None
     status: Literal["purchased", "in_transit", "in_stock", "listed"] = "purchased"
-    target_sale_cents: int | None = Field(default=None, ge=0)
+    target_sale_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     listed_channel: str | None = Field(default=None, max_length=64)
     location: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=4000)
@@ -461,24 +467,24 @@ class InventoryUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     sku: str | None = Field(default=None, max_length=64)
     condition: Literal["new", "used", "refurbished", "for_parts", "unknown"] | None = None
-    unit_cost_cents: int | None = Field(default=None, ge=0)
-    extra_costs_cents: int | None = Field(default=None, ge=0)
+    unit_cost_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
+    extra_costs_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     status: Literal["purchased", "in_transit", "in_stock", "listed", "returned", "written_off"] | None = None
-    target_sale_cents: int | None = Field(default=None, ge=0)
+    target_sale_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     listed_channel: str | None = Field(default=None, max_length=64)
     location: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=4000)
 
 
 class SaleIn(BaseModel):
-    quantity: int = Field(default=1, ge=1)
-    unit_price_cents: int = Field(ge=0)
+    quantity: int = Field(default=1, ge=1, le=MAX_QUANTITY)
+    unit_price_cents: int = Field(ge=0, le=MAX_CENTS)
     channel: str | None = Field(default=None, max_length=64)
     fee_profile_key: str | None = None  # compute fees with the calculator
-    fees_cents: int | None = Field(default=None, ge=0)  # override: total fees actually charged
-    shipping_cents: int = Field(default=0, ge=0)  # total shipping paid by seller
-    taxes_withheld_cents: int | None = Field(default=None, ge=0)  # override
-    other_costs_cents: int = Field(default=0, ge=0)
+    fees_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # override: total fees actually charged
+    shipping_cents: int = Field(default=0, ge=0, le=MAX_CENTS)  # total shipping paid by seller
+    taxes_withheld_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # override
+    other_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     sold_at: datetime | None = None
     notes: str | None = Field(default=None, max_length=2000)
 
@@ -578,10 +584,10 @@ class AlertRuleIn(BaseModel):
     keywords: str | None = Field(default=None, max_length=200)
     brand: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, max_length=80)
-    min_profit_cents: int | None = Field(default=None, ge=0)
-    min_roi_bp: int | None = Field(default=None, ge=0)
+    min_profit_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
+    min_roi_bp: int | None = Field(default=None, ge=0, le=100000)
     min_score: float | None = Field(default=None, ge=0, le=100)
-    max_buy_cents: int | None = Field(default=None, ge=0)
+    max_buy_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     min_confidence: Literal["low", "medium", "high"] | None = None
     exclude_suspicious: bool = True
     channels: list[Literal["in_app", "ntfy", "telegram", "webhook"]] = ["in_app"]
@@ -595,10 +601,10 @@ class AlertRuleUpdate(BaseModel):
     keywords: str | None = Field(default=None, max_length=200)
     brand: str | None = Field(default=None, max_length=80)
     category: str | None = Field(default=None, max_length=80)
-    min_profit_cents: int | None = Field(default=None, ge=0)
-    min_roi_bp: int | None = Field(default=None, ge=0)
+    min_profit_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
+    min_roi_bp: int | None = Field(default=None, ge=0, le=100000)
     min_score: float | None = Field(default=None, ge=0, le=100)
-    max_buy_cents: int | None = Field(default=None, ge=0)
+    max_buy_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     min_confidence: Literal["low", "medium", "high"] | None = None
     exclude_suspicious: bool | None = None
     channels: list[Literal["in_app", "ntfy", "telegram", "webhook"]] | None = None
@@ -670,10 +676,10 @@ class SettingsUpdate(BaseModel):
     default_fee_profile_key: str | None = None
     default_fee_profile_key_used: str | None = None
     target_roi_bp: int | None = Field(default=None, ge=0, le=100000)
-    min_profit_cents: int | None = Field(default=None, ge=0)
+    min_profit_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     min_roi_bp: int | None = Field(default=None, ge=0, le=100000)
     pricing_strategy: Literal["competitive", "market"] | None = None
-    unknown_shipping_assumption_cents: int | None = Field(default=None, ge=0)
+    unknown_shipping_assumption_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     fx_usd_mxn_manual: str | None = None
     include_demo_data: bool | None = None
 

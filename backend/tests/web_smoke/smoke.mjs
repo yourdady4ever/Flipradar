@@ -376,9 +376,12 @@ export async function runSmoke({ url, token, mutate = false, log = console.log }
           await reveal.click();
           await page.waitForSelector('#main a.row-link');
         }
-        const link = page.locator('#main a.row-link').first();
+        // a new or seen row: a bought (e.g. by an earlier run) or expired one offers no Watch
+        const link = page.locator('#main tbody tr')
+          .filter({ has: page.locator('td .badge', { hasText: /^(new|seen)$/ }) })
+          .locator('a.row-link').first();
         if ((await link.count()) === 0) {
-          log('       (no opportunities: skipped)');
+          log('       (no new or seen opportunities: skipped)');
           return;
         }
         await link.click();

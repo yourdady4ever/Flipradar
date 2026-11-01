@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ...config import Settings
 from ...models import Listing, Source
-from ...schemas import ListingDetailOut, ListingOut, Page
+from ...schemas import MAX_ID, ListingDetailOut, ListingOut, Page
 from ...services.serialize import listing_detail_out, listing_out
 from ..deps import MAX_PAGE_SIZE, get_db, get_settings
 from ._common import count, include_demo, like_pattern
@@ -20,12 +20,12 @@ router = APIRouter(prefix="/listings", tags=["listings"])
 def list_listings(
     q: str | None = Query(None, max_length=200),
     source: str | None = Query(None, max_length=64),
-    product_id: int | None = None,
+    product_id: int | None = Query(None, ge=1, le=MAX_ID),
     suspicious: bool | None = None,
     status: str | None = Query(None, max_length=16),
     include_demo_data: bool | None = Query(None, alias="include_demo"),
     limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_ID),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Page[ListingOut]:

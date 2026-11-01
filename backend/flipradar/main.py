@@ -12,12 +12,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
+from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .api.deps import require_token
+from .api.deps import require_token, token_is_active
 from .api.routers import (
     alerts,
     analytics,
@@ -41,8 +42,19 @@ from .api.routers import (
 from .api.routers import settings as settings_router
 from .config import Settings, get_settings
 from .db import create_all, init_engine, session_scope
-from .security import RateLimiter, RateLimitMiddleware, SecurityHeadersMiddleware
+from .security import (
+    DEFAULT_MAX_BODY_BYTES,
+    DEFERRED_CLIENT_IP_KEY,
+    BodySizeLimitMiddleware,
+    LocalRequestGuardMiddleware,
+    RateLimiter,
+    RateLimitMiddleware,
+    Scope,
+    SecurityHeadersMiddleware,
+    bearer_credentials,
+)
 from .services import scheduler
+from .services.imports import MAX_BYTES as CSV_MAX_BYTES
 from .services.bootstrap import bootstrap
 from .services.errors import Conflict, Invalid, NotFound
 from .services.timeutil import install_utc_listeners
@@ -55,6 +67,9 @@ STATIC_DIR = WEB_DIR / "static"
 API_PREFIX = "/api/v1"
 DOCS_URL = "/api/docs"
 OPENAPI_URL = f"{API_PREFIX}/openapi.json"
+CSV_IMPORT_PATH = f"{API_PREFIX}/import/csv"
+# The CSV file itself is capped at 5 MB by the importer; this leaves room for the multipart framing.
+CSV_UPLOAD_MAX_BODY_BYTES = CSV_MAX_BYTES + 64 * 1024
 
 API_ROUTERS = (
     auth.router,
@@ -101,10 +116,17 @@ def _install_error_handlers(app: FastAPI) -> None:
         return JSONResponse({"detail": "This feature depends on a component that is not implemented yet."},
                             status_code=503)
 
+    async def out_of_range(_: Request, exc: Exception) -> JSONResponse:
+        # Backstop for integers that do not fit SQLite's 64-bit INTEGER (e.g. a huge path id): the
+        # client sent an impossible value, so this is a 422, not a server error.
+        log.warning("numeric value out of range: %s", exc)
+        return JSONResponse({"detail": "A numeric value in the request is out of range."}, status_code=422)
+
     app.add_exception_handler(NotFound, not_found)
     app.add_exception_handler(Conflict, conflict)
     app.add_exception_handler(Invalid, invalid)
     app.add_exception_handler(NotImplementedError, not_implemented)
+    app.add_exception_handler(OverflowError, out_of_range)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -120,7 +142,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task = scheduler.start(settings) if settings.scheduler_enabled else None
         app.state.scheduler_task = task
         if settings.require_auth is False:
-            log.warning("API authentication is DISABLED (FLIPRADAR_REQUIRE_AUTH=false); only do this on localhost")
+            log.warning("API authentication is DISABLED (FLIPRADAR_REQUIRE_AUTH=false); only do this on localhost. "
+                        "Only local Host headers and same-origin browser requests are accepted.")
         try:
             yield
         finally:
@@ -139,7 +162,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.rate_limiter = RateLimiter(settings.rate_limit_per_minute, 60.0)
     _install_error_handlers(app)
 
-    # Middleware: the last added is the outermost.  Security headers wrap everything (incl. 429s).
+    async def authorize_upload(scope: Scope) -> bool:
+        """Token check for bodies larger than the default limit, run before any byte is read."""
+        if not settings.require_auth:
+            return True
+        token = bearer_credentials(scope)
+        valid = token is not None and await run_in_threadpool(token_is_active, token)
+        client_ip = scope.get(DEFERRED_CLIENT_IP_KEY)
+        if not valid and client_ip is not None:
+            app.state.rate_limiter.hit(f"ip:{client_ip}")  # same accounting as require_token
+        return valid
+
+    # Middleware: the last added is the outermost.  Order, outermost first: security headers (on every
+    # response, incl. 413/429), rate limit, local-only guard (token-less mode), body size, CORS, routes.
     origins = settings.cors_origin_list
     if origins:
         app.add_middleware(
@@ -149,7 +184,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             allow_headers=["Authorization", "Content-Type"],
         )
-    app.add_middleware(RateLimitMiddleware, limiter=app.state.rate_limiter)
+    app.add_middleware(BodySizeLimitMiddleware, default_limit=DEFAULT_MAX_BODY_BYTES,
+                       path_limits={CSV_IMPORT_PATH: CSV_UPLOAD_MAX_BODY_BYTES}, authorize=authorize_upload)
+    if not settings.require_auth:
+        app.add_middleware(LocalRequestGuardMiddleware, allowed_hosts=settings.allowed_host_list,
+                           allowed_origins=origins)
+    app.add_middleware(RateLimitMiddleware, limiter=app.state.rate_limiter,
+                       trusted_proxies=settings.trusted_proxy_networks,
+                       defer_prefix=f"{API_PREFIX}/" if settings.require_auth else None,
+                       defer_exclude=(OPENAPI_URL,))
     app.add_middleware(SecurityHeadersMiddleware, docs_paths=(DOCS_URL,))
 
     app.include_router(health.router)

@@ -7,14 +7,29 @@ connector reports itself as "not configured" instead of failing the whole applic
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATA_DIR = BACKEND_DIR / "data"
+_HOSTNAME_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*")
+
+
+def _split(value: str) -> list[str]:
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def normalize_host(host: str) -> str:
+    """Lower-case host name without brackets or trailing dot (``[::1]`` -> ``::1``, ``Flip.`` -> ``flip``)."""
+    host = host.strip().lower()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host.rstrip(".")
 
 
 class Settings(BaseSettings):
@@ -29,8 +44,14 @@ class Settings(BaseSettings):
     # When true, /api endpoints require a bearer token (strongly recommended whenever the server is
     # reachable from other devices).  Tokens are created with ``flipradar create-token``.
     require_auth: bool = True
-    # Seconds; protects the login-less token endpoints against brute force.
+    # Requests per minute: per bearer token for authenticated API calls, per client IP otherwise.
     rate_limit_per_minute: int = 240
+    # Comma separated IPs/CIDRs of reverse proxies (Caddy, nginx...) whose X-Forwarded-For header the rate
+    # limiter may use to find the real client address, e.g. "127.0.0.1".  Empty: the header is ignored.
+    trusted_proxies: str = ""
+    # Only used when require_auth=false: extra host names accepted in the Host header besides localhost,
+    # 127.0.0.1 and [::1] (comma separated).  Protects the token-less mode against DNS rebinding.
+    allowed_hosts: str = ""
     user_agent: str = "FlipRadar/0.1 (self-hosted personal price research tool)"
     http_timeout_seconds: float = 20.0
     log_level: str = "INFO"
@@ -102,9 +123,39 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_timeout_seconds: float = 60.0
 
+    @field_validator("trusted_proxies")
+    @classmethod
+    def _check_trusted_proxies(cls, value: str) -> str:
+        for item in _split(value):
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                raise ValueError(f"FLIPRADAR_TRUSTED_PROXIES: {item!r} is not an IP address or CIDR") from exc
+        return value
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _check_allowed_hosts(cls, value: str) -> str:
+        for item in _split(value):
+            host = normalize_host(item)
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                if not _HOSTNAME_RE.fullmatch(host):
+                    raise ValueError(f"FLIPRADAR_ALLOWED_HOSTS: {item!r} is not a host name") from None
+        return value
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_proxy_networks(self) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+        return [ipaddress.ip_network(item, strict=False) for item in _split(self.trusted_proxies)]
+
+    @property
+    def allowed_host_list(self) -> list[str]:
+        return [normalize_host(item) for item in _split(self.allowed_hosts)]
 
     @property
     def rss_feed_list(self) -> list[str]:

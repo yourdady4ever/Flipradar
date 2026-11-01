@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from ...config import Settings
 from ...engine import stats as stats_engine
 from ...models import Listing, Product
-from ...schemas import Page, PriceStatsOut, ProductDetailOut, ProductOut
+from ...schemas import MAX_ID, Page, PriceStatsOut, ProductDetailOut, ProductOut
 from ...services import settings_store
 from ...services.analysis import shipping_mxn_cents
 from ...services.ingestion import DEMO_KEY_PREFIX
@@ -32,7 +32,7 @@ def list_products(
     category: str | None = Query(None, max_length=80),
     include_demo_data: bool | None = Query(None, alias="include_demo"),
     limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_ID),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Page[ProductOut]:

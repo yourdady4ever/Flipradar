@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session, selectinload
 from ...ai import narrative
 from ...config import Settings
 from ...models import Listing, Opportunity, OpportunityStatus, Product, Source
+from ...money import MAX_CENTS
 from ...schemas import (
+    MAX_ID,
     AiSummaryOut,
     InventoryOut,
     OpportunityBuyIn,
@@ -28,6 +30,8 @@ from ._common import count, include_demo, like_pattern, split_csv_param
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
 
 ALL_STATUSES = {s.value for s in OpportunityStatus}
+# Filters may be negative (losses) and must stay inside SQLite's 64-bit INTEGER (else: HTTP 500).
+MAX_ROI_FILTER_BP = 10**9
 DEFAULT_STATUSES = ("new", "seen", "watching", "bought")
 SORTS = {
     "score": (Opportunity.score.desc(), Opportunity.net_profit_cents.desc()),
@@ -52,14 +56,14 @@ def list_opportunities(
     ),
     q: str | None = Query(None, max_length=200),
     min_score: float | None = Query(None, ge=0, le=100),
-    min_profit_cents: int | None = None,
-    min_roi_bp: int | None = None,
+    min_profit_cents: int | None = Query(None, ge=-MAX_CENTS, le=MAX_CENTS),
+    min_roi_bp: int | None = Query(None, ge=-MAX_ROI_FILTER_BP, le=MAX_ROI_FILTER_BP),
     include_suspicious: bool = Query(False, description="also return suspicious opportunities (critical flag or 2+ warnings)"),
     include_demo_data: bool | None = Query(None, alias="include_demo"),
     source: str | None = Query(None, max_length=64),
     sort: Literal["score", "profit", "roi", "recent"] = "score",
     limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_ID),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Page[OpportunityOut]:

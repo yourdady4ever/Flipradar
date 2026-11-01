@@ -40,6 +40,8 @@ BP = Decimal(10000)
 # line items (commission, payment fee, IVA on fees, ISR, IVA withheld) with the first two also scaled by
 # up to (1 + IVA) inside the IVA line gives at most 0.5 * (2 * 2 + 3) = 3.5 centavos.
 ROUNDING_SLACK_CENTS = 4
+# Segments up to this width are simply scanned; wider ones are narrowed with the trend bounds first.
+_DIRECT_SCAN = 64
 # Largest window scanned centavo by centavo when locating the exact first root of a segment.
 _MAX_SCAN = 4096
 
@@ -282,7 +284,7 @@ def _first_root(profit: Callable[[int], int], lo: int, hi: int) -> int | None:
     most E), a root can only exist where ``u(s) >= -E`` and certainly exists where ``u(s) >= E``.  That
     window is a few centavos wide for any real fee profile, and it is scanned exhaustively, so the answer
     is the true minimum - no step caps and no work proportional to the price."""
-    if hi - lo <= _MAX_SCAN:
+    if hi - lo <= _DIRECT_SCAN:
         return next((s for s in range(lo, hi + 1) if profit(s) >= 0), None)
     p_lo = profit(lo)
     if p_lo >= 0:

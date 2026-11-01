@@ -460,8 +460,6 @@ def _edition(text: str) -> str | None:
     return None
 
 
-_inch_token = V.inch_token
-
 _WATCH_MATERIAL_RES = (
     (re.compile(r"(?<!\w)(?:acero(?:\sinoxidable)?|inoxidable|stainless(?:\ssteel)?|steel)(?!\w)"), "steel"),
     (re.compile(r"(?<!\w)(?:titanio|titanium)(?!\w)"), "titanium"),
@@ -500,7 +498,7 @@ def _identity_tokens(text: str, category: str | None, model: str | None) -> list
         if V.has(text, "gps"):
             tokens.append("gps")
     if category in ("tablet", "laptop"):
-        sizes = {_inch_token(m.group(1)) for m in re.finditer(r"(?<![\w.])(\d{1,2}(?:\.\d)?)in(?!\w)", text)}
+        sizes = {V.inch_token(m.group(1)) for m in re.finditer(r"(?<![\w.])(\d{1,2}(?:\.\d)?)in(?!\w)", text)}
         tokens.extend(sorted(s for s in sizes if 7 <= int(s[:-2]) <= 18))
     if category == "smartwatch":
         tokens.extend(sorted({m.group(1) + "mm" for m in re.finditer(r"(?<!\w)(3[8-9]|4[0-9]|5[01])mm(?!\w)", text)}))
@@ -554,6 +552,7 @@ def _word_patterns(words: tuple[tuple[str, str], ...]) -> list[tuple[re.Pattern[
 _STRONG = _word_patterns(V.STRONG_ACCESSORY_WORDS)
 _WEAK = _word_patterns(V.WEAK_ACCESSORY_WORDS)
 _EMPTY_BOX = re.compile(r"(?<!\w)(?:" + "|".join(V.EMPTY_BOX_CUES) + r")(?!\w)")
+_PART_ANY_CONTEXT = re.compile(r"(?<!\w)(?:" + "|".join(V.PART_WORDS_ANY_CONTEXT) + r")(?!\w)")
 _ACCESSORY_CATEGORY = re.compile(
     r"accesorio|funda|mica|protector|cargador|cable|refaccion|repuesto|correa|estuche|case|charger|parts"
 )
@@ -579,7 +578,11 @@ def _is_inclusion(text: str, pos: int, *, digits: bool, model_end: int | None = 
         return True
     if digits and prev[-1].isdigit():
         digit_start = text.rfind(prev[-1], 0, pos)
-        if model_end is None or digit_start >= model_end:
+        word = text[pos:].split()[:1]
+        # "2 controles" / "1 funda": a quantity; "iPad Air 11 funda" / "Switch 2 funda": a model number or
+        # size followed by a singular word is not
+        quantity = prev[-1] == "1" or (bool(word) and word[0].endswith("s"))
+        if quantity and (model_end is None or digit_start >= model_end):
             return True
     if prev[-1] == "de" and len(prev) > 1 and prev[-2] in V.DEVICE_NOUNS:
         return True  # "consola de juegos"
@@ -658,11 +661,15 @@ def detect_accessory(
             if _is_inclusion(text, start, digits=False):
                 continue
             return True, typ, f"title leads with an accessory word ({typ})"
+        model_end = device_end if device_end is not None else device_start
+        for m in _PART_ANY_CONTEXT.finditer(text, model_end):
+            if not _is_inclusion(text, m.start(), digits=False):
+                return True, "spare_part", "replacement part named after the device (logic board, housing...)"
         if not has_storage and not _has_device_noun(text):
-            model_end = device_end if device_end is not None else device_start
-            weak_spans = _word_spans(text, _WEAK)
-            spans = sorted([(s, e, t, True) for s, e, t in _word_spans(text, _STRONG)]
-                           + [(s, e, t, False) for s, e, t in weak_spans])
+            spans = sorted(
+                [(*span, True) for span in _word_spans(text, _STRONG)]
+                + [(*span, False) for span in _word_spans(text, _WEAK)]
+            )
             for start, end, typ, is_strong in spans:
                 if start < model_end or typ == "empty_box":
                     continue
@@ -777,11 +784,14 @@ def _is_filler(token: str) -> bool:
     return token in V.PREFIX_FILLERS or V.BRAND_RE.fullmatch(token) is not None or token in V.VARIANT_WORDS
 
 
+#: Second words of multi-word color names ("gris espacial", "blanco estelar") and "neon" (Switch Joy-Con).
+_COLOR_WORDS = frozenset({"espacial", "estelar", "natural", "neon"})
+
+
 def _is_color_word(token: str) -> bool:
     return token in _COLOR_WORDS or extract_color(token) is not None
 
 
-_COLOR_WORDS = frozenset({"espacial", "estelar", "natural", "neon"})
 _SIZE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?(?:gb|tb|in|mm|hz|mah|w)?")
 
 
@@ -858,10 +868,13 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
         category, model = _detect_category(text, brand), None
     ram, storage = _ram_and_storage(text, category)
     model_end = _model_end(text, primary)
+    # A storage mention is device evidence, except for single-configuration models where it usually
+    # describes a memory card ("Nintendo Switch OLED Memoria 256gb").
+    device_storage = storage is not None and model not in V.FIXED_STORAGE_MODELS
     accessory, acc_type, acc_reason = detect_accessory(
         text,
         primary.start if primary else None,
-        has_storage=storage is not None,
+        has_storage=device_storage,
         source_category=source_category,
         device_end=model_end,
     )
@@ -872,7 +885,7 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
         and primary is not None
         and model_end is not None
         and not bundle
-        and storage is None
+        and not device_storage
         and not _has_device_noun(text)
     ):
         # "PS5 Dualsense Blanco": an accessory product named after the device it belongs to.
@@ -898,7 +911,7 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
             ambiguous = True
         prefix = text[: primary.start].split()
         unknown = [] if primary.rule in V.EXACT_CODE_RULES else [tok for tok in prefix if not _is_filler(tok)]
-        no_device_details = category == "console" and storage is None and not _has_device_noun(text)
+        no_device_details = category == "console" and not device_storage and not _has_device_noun(text)
         suffix_unknown = (
             [tok for tok in _words_until_inclusion(text, model_end) if not _known_token(tok)]
             if no_device_details and model_end is not None
@@ -984,14 +997,21 @@ def analyze_listing(raw: RawListing) -> tuple[NormalizedAttributes, list[str]]:
     if model is None and raw.model and not a["is_accessory"] and not a["ambiguous"]:
         source_hits = [h for h in V.find_model_hits(normalize_text(raw.model)) if h.model and not h.accessory_type]
         hit = source_hits[0] if source_hits else None
-        if hit is not None and not generic_source_brand and brand == hit.brand and _title_names_device(text, hit.category):
+        # The model field of accessory and clone listings names the device they fit or imitate, so it is
+        # only trusted when the brand is confirmed and the title itself says it sells such a device.
+        refusal = None
+        if hit is not None:
+            if generic_source_brand:
+                refusal = "the source brand is generic"
+            elif brand != hit.brand:
+                refusal = f"the brand {hit.brand} is not confirmed by the title or the source's brand field"
+            elif not _title_names_device(text, hit.category):
+                refusal = f"the title does not say it sells a {hit.category}"
+        if hit is not None and refusal is None:
             brand, model, category = hit.brand, hit.model, hit.category
             notes.append("model taken from the source's model field")
         elif hit is not None:
-            # The model field of accessory/clone listings names the device they fit or imitate.
-            notes.append(
-                f"source model field ({hit.model}) ignored: the title does not name a {hit.category} of that brand"
-            )
+            notes.append(f"source model field ({hit.model}) ignored: {refusal}")
     if category is None:
         category = _detect_category(text, brand)
 

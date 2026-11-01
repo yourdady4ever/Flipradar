@@ -547,3 +547,30 @@ def test_finance7_written_off_at_column_is_added_to_existing_databases(api, db, 
         rows = {i.status: i.written_off_at for i in s.scalars(select(InventoryItem))}
         assert rows["written_off"] is not None and rows["in_stock"] is None  # legacy write-off backfilled
     assert api.get("/api/v1/analytics/summary?days=30").json()["realized_profit_cents"] == -70_000
+
+
+def test_services2_a_failed_database_phase_is_recorded_and_other_sources_still_run(
+    slow_collector, fake_collectors, fake_pipeline, monkeypatch
+):
+    real_close = collection._close_run
+
+    def locked_close(session, run, source, key, status, payload, settings):
+        if key == "slowsource":
+            raise RuntimeError("database is locked")
+        return real_close(session, run, source, key, status, payload, settings)
+
+    monkeypatch.setattr(collection, "_close_run", locked_close)
+
+    async def main():
+        session = SessionLocal()
+        try:
+            return await collection.run_collection(session, "z", ["slowsource", "fakesource"], 10, analyze=False)
+        finally:
+            session.close()
+
+    result = asyncio.run(main())
+    assert [(r.source_key, r.status) for r in result.runs] == [("slowsource", "error"), ("fakesource", "ok")]
+    with session_scope() as s:
+        runs = s.scalars(select(CollectionRun).order_by(CollectionRun.id)).all()
+        assert [r.status for r in runs] == ["error", "ok"]
+        assert runs[0].error == "could not store the results: RuntimeError"

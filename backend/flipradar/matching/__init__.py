@@ -6,7 +6,16 @@ from .matcher import (
     canonical_key,
     compare,
     hard_conflicts,
+    missing_identity,
     soft_differences,
 )
 
-__all__ = ["ProductCandidate", "ProductMatcher", "canonical_key", "compare", "hard_conflicts", "soft_differences"]
+__all__ = [
+    "ProductCandidate",
+    "ProductMatcher",
+    "canonical_key",
+    "compare",
+    "hard_conflicts",
+    "missing_identity",
+    "soft_differences",
+]
