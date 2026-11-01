@@ -79,7 +79,9 @@ existing deployment, see `CONTINUATION.md` § "Schema changes".
    exclusion is counted and reported. Resale statistics use the **item price**: buyer-paid shipping
    is not seller revenue, and seller-paid shipping is charged by the fee profile.
 2. **Buy candidates.** Only active listings seen within `buy_max_age_days` (default 3) qualify.
-   Opportunities whose buy listing went stale are expired on every recompute. Listings shipped from
+   Opportunities whose buy listing went stale are expired on every recompute. Their previous `seen`
+   or `watching` status is remembered in `status_before_expiry` and restored when the listing is
+   seen again. Listings shipped from
    abroad (for example eBay US) get an estimated Mexican import cost from the courier rules in
    `finance/import_costs.py`, converted at the listing's stored FX rate. That cost is charged as an
    acquisition cost and is shown in the explanation. If the rule says a formal import is required, or
@@ -109,7 +111,8 @@ existing deployment, see `CONTINUATION.md` § "Schema changes".
 8. **Explanation** (`engine/explain.py`). A facts dictionary and a sectioned plain-text explanation.
 9. **Persistence** (`services/analysis.py`). Opportunities are upserted per buy listing. User
    statuses (seen/watching/dismissed/bought) survive recomputes and fee-profile changes. A bought
-   opportunity cannot be reopened while an inventory item references it.
+   opportunity cannot be reopened while an inventory item references it (409). Once that item is
+   deleted, it can be restored to `new` from either client.
 
 ## Product equivalence (normalize/, matching/)
 
@@ -126,8 +129,10 @@ Accessories never share a cluster with devices. Precision comes first: a listing
 when it omits an attribute that changes the price, such as storage, PS5/Xbox edition or the screen
 size of a multi-size line. The same applies when it contradicts itself (for example two Apple Watch
 case materials), negates a variant ("no es OLED"), or names an accessory, game or part after the
-device. A GTIN never pulls a listing into a less specific product. This costs some recall; see
-`TODO.md`.
+device. A family's standard in-box parts do not turn a listing into an accessory when the title also
+describes the device: a watch band, the earbuds' charging case, or the OLED's Joy-Con after a colour
+or model word. Condition, paperwork and logistics phrases after "con"/"y" are not bundles. A GTIN
+never pulls a listing into a less specific product. This costs some recall; see `TODO.md`.
 
 ## Interfaces
 
@@ -151,6 +156,10 @@ There is one process. FastAPI routes and the scheduler run on one asyncio loop. 
 **No write transaction is held across a network await.** A collection run commits its run row first,
 calls the collector, and then ingests in one short transaction on a worker thread. Push notifications
 are sent first, and their delivery status is written afterwards. Stock decrements are atomic
-(`UPDATE ... WHERE quantity_available >= n`). This is
+(`UPDATE ... WHERE quantity_available >= n`). Recompute analyses each product in its own short
+`BEGIN IMMEDIATE` transaction (`bootstrap.begin_write`), so a concurrent writer waits for the lock
+instead of failing. Collection runs interrupted mid-network are recorded as errors, and runs still
+`running` after 30 minutes are closed at startup and on each scheduler tick. Notification ids are
+`AUTOINCREMENT`, so they are never reused. This is
 appropriate for a single user or a small team. To scale beyond that, see `CONTINUATION.md`, which
 covers moving to PostgreSQL and a separate worker.

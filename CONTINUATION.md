@@ -96,7 +96,9 @@ columns to existing tables. For a column change on a deployed database, either:
   `flipradar.db.Base.metadata`, and autogenerate a baseline revision before your change), or
 * for small additive changes, add the column to `services/bootstrap.ensure_added_columns`. It runs
   `ALTER TABLE ... ADD COLUMN` when `PRAGMA table_info` shows the column is missing, which is how
-  `inventory_items.written_off_at` was added.
+  `inventory_items.written_off_at` and `opportunities.status_before_expiry` were added.
+  `bootstrap.ensure_monotonic_notification_ids` shows a non-additive SQLite migration: it rebuilds a
+  table in one transaction.
 
 Back up `backend/data/flipradar.db` first.
 
@@ -118,9 +120,12 @@ shared store.
 * **No scraping behind anti-bot protection, and no bypassing API policy blocks.** See `docs/DATA_SOURCES.md`.
 * **AI output is validated against facts,** and is discarded if it contains an unknown number.
 * **Inventory accounting:** cost basis is allocated cumulatively, so the sale that empties an item
-  takes the rounding remainder. Unit or extra costs can't be edited once an item has sales (409); use
+  takes the rounding remainder, with an average-cost fallback that can never go negative. Unit or extra costs can't be edited once an item has sales (409); use
   a sale's `other_costs_cents`. Written-off stock is a realized loss, while `returned` means refunded.
-* **No write transaction across an await,** because of the SQLite single-writer lock. See ARCHITECTURE.md.
+* **No write transaction across an await,** because of the SQLite single-writer lock. A write
+  transaction that reads first must take the write lock first (`bootstrap.begin_write`, which issues
+  `BEGIN IMMEDIATE`). Otherwise SQLite fails at once with "database is locked" instead of waiting.
+  See ARCHITECTURE.md.
 * **The Android app uses only framework APIs,** so it builds without Google Maven. Adding AndroidX
   would break `build-offline.sh`. If you do add it, keep the Gradle build as the only path and update
   CI and the docs.

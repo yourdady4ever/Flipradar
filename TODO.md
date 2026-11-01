@@ -2,10 +2,9 @@
 
 Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3** = nice to have.
 
-## P0: fix the open regression findings
+## P0: done
 
-- [ ] Work through [`docs/OPEN_REVIEW_FINDINGS.md`](docs/OPEN_REVIEW_FINDINGS.md), high severity
-  first. For PENDING items, reproduce before fixing. Add a regression test for each.
+- [x] The second-round review findings are resolved; see [`docs/OPEN_REVIEW_FINDINGS.md`](docs/OPEN_REVIEW_FINDINGS.md).
 
 ## P1: verify with real accounts and networks (the build sandbox could not reach these hosts)
 
@@ -30,13 +29,20 @@ Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3*
 - [ ] **Recover matching recall safely.** Listings that omit storage, PS5/Xbox edition or the screen size
   of multi-size lines are deliberately not clustered (precision first). Add user-confirmed defaults per
   product family (for example "PS5 Slim 1TB without 'digital' = standard edition") and a "needs review"
-  queue in the dashboard to assign such listings by hand.
+  queue in the dashboard to assign such listings by hand. These are deliberately left unclustered
+  today:
+  - "Switch OLED Joy-Con Neon" (Joy-Con named right after the model);
+  - the dash-separated "AirPods Pro (2.ª generación) - Estuche de carga MagSafe";
+  - "<storage> Max bateria" iPhones;
+  - games after a descriptive word ("con caja Astro Bot").
+
+  A price-ratio guard against the cluster median could recover them.
+- [ ] **Separate buy window for manual/CSV rows and demo data.** Today they expire after
+  `buy_max_age_days` (3) like collected listings; the user's status survives.
 - [ ] **Category name from Mercado Libre.** Pass `category_name` from the catalog API (domain name) into
   `RawListing`, so the normalizer's accessory-category guard can fire.
 - [ ] **`formal_import_required` in `ImportCostOut`.** Expose this flag, make duties nullable when they
   are not estimated, and disable the dashboard's "Use duties" button in that case.
-- [ ] **`sqlite_autoincrement` on `notifications`,** so ids are never reused after deletes. The
-  Android poller no longer depends on this.
 - [ ] **ML fee lookup in analysis.** When a token is configured, use `/sites/MLM/listing_prices`
   (already implemented in `MercadoLibreCollector.get_listing_fee`) to replace the profile's
   commission with the exact per-category rate. Cache the rate per category.

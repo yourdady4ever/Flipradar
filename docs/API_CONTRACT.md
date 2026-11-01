@@ -77,8 +77,10 @@ Opportunity status: a `PATCH` that moves a `bought` opportunity to any other sta
 inventory item references it.  Deleting that item does not change the status; to undo a purchase marked by
 mistake, delete the item, then `PATCH {"status": "new"}` (the clients' "Restore to new").
 
-Notifications: `since_id=0` returns the newest `limit` rows; `since_id=N>0` returns the OLDEST `limit`
-rows with id > N (listed newest first), so a poller never skips notifications.
+Notifications: `since_id=0` returns the newest `limit` rows. `since_id=N>0` returns the OLDEST `limit`
+rows with id > N, listed newest first. Ids are `AUTOINCREMENT`, so they are not reused. Ids deleted
+before the 0.1.0 upgrade can be handed out once more, and a reset database restarts at 1. A poller
+whose cursor is above the newest inbox id should therefore reset it.
 
 ## Web dashboard
 
