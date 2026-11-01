@@ -44,7 +44,7 @@ pip install -e ".[dev]"
 python -m flipradar init                            # creates backend/data/flipradar.db + default fee profiles
 python -m flipradar create-token --name laptop      # prints a token ONCE - save it
 python -m flipradar seed-demo                       # optional: clearly-labelled synthetic demo data
-python -m flipradar serve                           # http://127.0.0.1:8000  (API docs at /docs)
+python -m flipradar serve                           # http://127.0.0.1:8000  (API docs at /api/docs)
 ```
 
 Open `http://127.0.0.1:8000` and paste the token. To reach the server from your phone on the same

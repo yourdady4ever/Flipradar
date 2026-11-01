@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 INTRO = """# FLIP RADAR API documentation
 
 > Generated from the OpenAPI schema by `backend/scripts/gen_api_docs.py`. Do not edit the endpoint
-> reference by hand; edit the code and regenerate it. Interactive docs: `http://<server>/docs`.
+> reference by hand; edit the code and regenerate it. Interactive docs (Swagger UI): `http://<server>/api/docs`; OpenAPI JSON: `/api/v1/openapi.json`.
 
 ## Basics
 

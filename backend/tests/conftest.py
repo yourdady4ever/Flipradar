@@ -350,6 +350,15 @@ import socket as _socket  # noqa: E402
 import pytest as _pytest  # noqa: E402
 
 _REAL_CONNECT = _socket.socket.connect
+_REAL_GETADDRINFO = _socket.getaddrinfo
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "0.0.0.0", "")
+
+
+def _guarded_getaddrinfo(host, *args, **kwargs):  # pragma: no cover - only triggers on a test bug
+    name = host.decode() if isinstance(host, bytes) else (host or "")
+    if name in _LOCAL_HOSTS or name.startswith("127."):
+        return _REAL_GETADDRINFO(host, *args, **kwargs)
+    raise RuntimeError(f"test tried to resolve {name!r}; mock the network call instead")
 
 
 def _guarded_connect(self, address):  # pragma: no cover - only triggers on a test bug
@@ -365,3 +374,4 @@ def _no_network(monkeypatch):
     for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(_socket.socket, "connect", _guarded_connect)
+    monkeypatch.setattr(_socket, "getaddrinfo", _guarded_getaddrinfo)

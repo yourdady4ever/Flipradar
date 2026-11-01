@@ -15,7 +15,8 @@ from ..deps import get_db, get_settings
 router = APIRouter(tags=["meta"])
 
 
-@router.api_route("/health", methods=["GET", "HEAD"], response_model=HealthOut)
+@router.head("/health", include_in_schema=False)
+@router.get("/health", response_model=HealthOut)
 def health(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> HealthOut:
     dialect = db.get_bind().dialect.name
     try:

@@ -11,6 +11,8 @@ def cli_env(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)  # no stray .env
     monkeypatch.setenv("FLIPRADAR_DATABASE_URL", f"sqlite:///{tmp_path / 'cli.db'}")
     monkeypatch.setenv("FLIPRADAR_SCHEDULER_ENABLED", "false")
+    monkeypatch.setenv("FLIPRADAR_FX_PUBLIC_SOURCES_ENABLED", "false")  # hermetic: no public FX calls
+    monkeypatch.delenv("FLIPRADAR_BANXICO_TOKEN", raising=False)
     for name in ("FLIPRADAR_BANXICO_TOKEN", "FLIPRADAR_FX_USD_MXN_MANUAL"):
         monkeypatch.delenv(name, raising=False)
     reset_settings_cache()
@@ -77,7 +79,7 @@ def test_collect_and_searches(cli_env, capsys, client, fake_collectors):
         cli.main(["collect", "x", "--limit", "500"])
 
 
-def test_fx_refresh_requires_token(cli_env, capsys):
+def test_fx_refresh_requires_a_source(cli_env, capsys):
     code, _, err = run(capsys, "fx-refresh")
     assert code == 1 and "BANXICO" in err
 
