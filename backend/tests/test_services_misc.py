@@ -76,12 +76,15 @@ def test_import_cost_brackets():
     mid = estimate_import_costs(10_000, 1_700, "courier_usmca", rate)
     assert mid["duty_rate_bp"] == 1700 and mid["duties_mxn_cents"] == 35_802  # 117 USD*18*17% = 358.02
     high = estimate_import_costs(20_000, 0, "courier_usmca", rate)
-    assert high["duty_rate_bp"] == 0 and any(n.startswith("WARNING") for n in high["notes"])
+    assert high["duty_rate_bp"] == 1900 and high["duties_mxn_cents"] == 68_400  # 200 USD*18*19% = 684.00
+    formal = estimate_import_costs(300_000, 0, "courier_usmca", rate)
+    assert formal["duty_rate_bp"] == 0 and any(n.startswith("WARNING") for n in formal["notes"])
+    assert select_rule("courier_usmca", 300_000).formal_import_required
     china = estimate_import_costs(10_000, 0, "courier_non_fta", rate)
     assert china["duty_rate_bp"] == 3350 and china["duties_mxn_cents"] == 60_300
     assert select_rule("courier_non_fta", 300_000).formal_import_required
-    for result in (low, mid, high, china):
-        assert any("PROVISIONAL" in n for n in result["notes"]) and result["as_of"] and result["source_url"]
+    for result in (low, mid, high, formal, china):
+        assert any("regla 3.7.35" in n for n in result["notes"]) and result["as_of"] and result["source_url"]
     with pytest.raises(KeyError):
         estimate_import_costs(1, 0, "nope", rate)
     with pytest.raises(ValueError):

@@ -1,8 +1,7 @@
 """Import duty estimates for buying abroad (e.g. eBay US) and reselling in Mexico.
 
-PROVISIONAL: the rules below are placeholders supplied by the project lead and MUST be verified against
-current Mexican customs rules (courier/"mensajeria y paqueteria" regime) before relying on them.  The
-estimate is deterministic: ``duties = customs_value_usd * usd_mxn_rate * duty_rate`` (Decimal, half-up to
+Rules follow the Mexican courier/parcel simplified regime ("mensajeria y paqueteria", RGCE regla
+3.7.35) as researched on 2026-11-01 (see docs/DATA_SOURCES.md section 3).  The estimate is deterministic: ``duties = customs_value_usd * usd_mxn_rate * duty_rate`` (Decimal, half-up to
 the centavo).  Customs value = item value + international shipping, in USD centavos.
 """
 
@@ -13,9 +12,18 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 BP = Decimal(10000)
-_AS_OF = "2026-10"
-_ANAM = "https://www.anam.gob.mx/"
-_PROVISIONAL = "PROVISIONAL - verify against current customs rules before relying on this estimate."
+_AS_OF = "2025-08-15"
+_RGCE = "https://www.sat.gob.mx/minisitio/NormatividadRMFyRGCE/documentos2025/rgce/rgce/4taRMRGCE_2025.pdf"
+_REGLA = "http://www.apta.com.mx/aptace/reglasce/regla.php?regla=3.7.35"
+_ESTIMATE = (
+    "Estimate under the courier/parcel simplified regime (RGCE regla 3.7.35, rates in force since "
+    "2025-08-15, researched 2026-11-01). The global rate replaces IGI + IVA; a fixed customs processing "
+    "fee (DTA) may still apply. Carriers may add brokerage fees. Not legal advice."
+)
+_COURIER_CAP = (
+    "Upper limit of the courier regime: USD 2,500 per consignee per the FedEx/AMCP table (some sources cite "
+    "USD 1,000 for consignees not registered in the Padron de Importadores) - low confidence."
+)
 
 
 @dataclass(frozen=True)
@@ -32,40 +40,57 @@ class ImportRule:
     formal_import_required: bool = False
 
 
+_USMCA = "Courier shipment from USA/Canada (USMCA/T-MEC origin)"
+_NON_FTA = "Courier shipment from a country without a trade agreement with Mexico (e.g. China)"
+
 IMPORT_RULES: dict[str, tuple[ImportRule, ...]] = {
     "courier_usmca": (
         ImportRule(
-            "courier_usmca", "Courier shipment from USA/Canada (USMCA/T-MEC)", 5000, 0,
-            ("Customs value up to 50 USD: no duties under the USMCA express-shipment threshold.",),
-            _ANAM, _AS_OF,
+            "courier_usmca", _USMCA, 5000, 0,
+            ("Customs value up to USD 50: exempt from IGI and IVA (DTA may still apply).",),
+            _RGCE, _AS_OF,
         ),
         ImportRule(
-            "courier_usmca", "Courier shipment from USA/Canada (USMCA/T-MEC)", 11700, 1700,
-            ("Customs value above 50 and up to 117 USD: 17 % global rate assumed (covers duty + IVA).",),
-            _ANAM, _AS_OF,
+            "courier_usmca", _USMCA, 11700, 1700,
+            ("Customs value above USD 50 and up to USD 117: 17 % global rate.",),
+            _REGLA, _AS_OF,
         ),
         ImportRule(
-            "courier_usmca", "Courier shipment from USA/Canada (USMCA/T-MEC)", None, 0,
+            "courier_usmca", _USMCA, 250000, 1900,
             (
-                "WARNING: customs value above 117 USD - a formal import (customs broker) is likely required; "
-                "duties are NOT estimated here.",
+                "Customs value above USD 117: 19 % global rate (shipments with air waybill/BL, goods not "
+                "subject to non-tariff restrictions).",
+                _COURIER_CAP,
             ),
-            _ANAM, _AS_OF, formal_import_required=True,
+            _RGCE, _AS_OF,
+        ),
+        ImportRule(
+            "courier_usmca", _USMCA, None, 0,
+            (
+                "WARNING: customs value above the courier-regime limit - a formal import (customs broker, "
+                "pedimento) is required; duties are NOT estimated here.",
+                _COURIER_CAP,
+            ),
+            _RGCE, _AS_OF, formal_import_required=True,
         ),
     ),
     "courier_non_fta": (
         ImportRule(
-            "courier_non_fta", "Courier shipment from a country without trade agreement", 250000, 3350,
-            ("33.5 % global rate assumed for courier shipments up to 2,500 USD from non-FTA countries.",),
-            _ANAM, _AS_OF,
+            "courier_non_fta", _NON_FTA, 250000, 3350,
+            (
+                "33.5 % global rate for courier shipments from countries without a trade agreement (was 19 % "
+                "from 2025-01-01 to 2025-08-14). Origins with other trade agreements (EU, Japan...) may differ.",
+                _COURIER_CAP,
+            ),
+            _RGCE, _AS_OF,
         ),
         ImportRule(
-            "courier_non_fta", "Courier shipment from a country without trade agreement", None, 0,
+            "courier_non_fta", _NON_FTA, None, 0,
             (
-                "WARNING: customs value above 2,500 USD - a formal import (customs broker) is required; "
-                "duties are NOT estimated here.",
+                "WARNING: customs value above the courier-regime limit - a formal import (customs broker) is "
+                "required; 2026 LIGIE tariffs of 5-50 % may apply to non-FTA origins; duties are NOT estimated.",
             ),
-            _ANAM, _AS_OF, formal_import_required=True,
+            _RGCE, _AS_OF, formal_import_required=True,
         ),
     ),
 }
@@ -112,7 +137,7 @@ def estimate_import_costs(
     duties = _cents(Decimal(customs_usd) * rate * Decimal(rule.duty_rate_bp) / BP)
     notes = [
         *rule.notes,
-        _PROVISIONAL,
+        _ESTIMATE,
         f"Rule '{rule.key}' as of {rule.as_of or 'unknown'}; reference: {rule.source_url or 'not recorded'}.",
         "Customs value = item value + international shipping, converted at the given USD/MXN rate.",
     ]

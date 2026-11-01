@@ -83,7 +83,7 @@ def test_import_costs_endpoint(api):
     assert r.json() == expected
     assert r.json()["duty_rate_bp"] == 1700
     assert r.json()["duties_mxn_cents"] == 33_023  # 105 USD * 18.50 * 17 % = 330.225 -> 330.23
-    assert any("PROVISIONAL" in n for n in r.json()["notes"])
+    assert any("regla 3.7.35" in n for n in r.json()["notes"])
 
 
 def test_import_costs_rate_resolution_and_errors(api):
