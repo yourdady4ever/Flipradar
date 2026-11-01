@@ -28,7 +28,8 @@ def test_demo_dataset_with_real_engine(api, db, settings):
     hidden = api.get("/api/v1/opportunities?include_suspicious=true").json()["items"]
     assert any("replica" in o["buy_title"] and o["risk_level"] == "critical" for o in hidden)
     detail = api.get(f"/api/v1/opportunities/{visible[0]['id']}").json()
-    assert detail["cost_breakdown"]["fee_profile_key"] == "ml_clasica"
+    expected_profile = "ml_clasica" if detail["buy_condition"] in ("new", "refurbished") else "ml_clasica_used"
+    assert detail["cost_breakdown"]["fee_profile_key"] == expected_profile
     assert detail["price_stats"]["n"] >= settings.min_comparables
     assert detail["demand"]["level"] in ("high", "medium", "low", "unknown")
     # The explanation the engine renders cites only numbers that are in its own facts.

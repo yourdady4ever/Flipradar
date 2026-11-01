@@ -21,7 +21,7 @@ from ...schemas import (
     Page,
 )
 from ...services import inventory as inventory_service
-from ...services.serialize import no_critical_risk, opportunity_detail_out, opportunity_out
+from ...services.serialize import opportunity_detail_out, opportunity_out
 from ..deps import MAX_PAGE_SIZE, get_db, get_settings
 from ._common import count, include_demo, like_pattern, split_csv_param
 
@@ -54,7 +54,7 @@ def list_opportunities(
     min_score: float | None = Query(None, ge=0, le=100),
     min_profit_cents: int | None = None,
     min_roi_bp: int | None = None,
-    include_suspicious: bool = Query(False, description="also return opportunities with critical risk flags"),
+    include_suspicious: bool = Query(False, description="also return suspicious opportunities (critical flag or 2+ warnings)"),
     include_demo_data: bool | None = Query(None, alias="include_demo"),
     source: str | None = Query(None, max_length=64),
     sort: Literal["score", "profit", "roi", "recent"] = "score",
@@ -90,9 +90,9 @@ def list_opportunities(
     if min_roi_bp is not None:
         stmt = stmt.where(Opportunity.roi_bp >= min_roi_bp)
     if not include_suspicious:
-        # Hide likely scams/replicas (critical flags).  Warning-level opportunities (e.g. a price that is a
-        # statistical outlier - which every real arbitrage gap is) stay visible with risk_level="warning".
-        stmt = stmt.where(no_critical_risk(Opportunity.risk_flags_json))
+        # Hide suspicious opportunities (critical flag or >= 2 warnings, see engine.risk.is_suspicious).
+        # A single warning stays visible with risk_level="warning".
+        stmt = stmt.where(Opportunity.is_suspicious.is_(False))
     if not include_demo(db, settings, include_demo_data):
         stmt = stmt.where(Opportunity.is_demo.is_(False))
     if source:

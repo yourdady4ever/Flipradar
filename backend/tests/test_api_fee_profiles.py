@@ -13,7 +13,9 @@ def test_builtin_profiles_seeded(api):
     assert BUILTIN_KEYS <= set(profiles)
     ml = profiles["ml_clasica"]
     assert ml["is_builtin"] and ml["commission_bp"] == 1500 and ml["isr_withholding_bp"] == 250
-    assert ml["iva_withholding_bp"] == 800 and ml["as_of"] == "2026-10" and "PROVISIONAL" in ml["notes"]
+    assert ml["iva_withholding_bp"] == 800 and ml["as_of"] == "2026-10-28" and "confirm" in ml["notes"]
+    used = profiles["ml_clasica_used"]
+    assert used["isr_withholding_bp"] == 0 and used["iva_withholding_bp"] == 0  # used items: no withholding
     assert ml["fixed_fee_tiers"][0] == {"max_price_cents": 9899, "fee_cents": 2500}
     assert ml["fixed_fee_tiers"][-1] == {"max_price_cents": None, "fee_cents": 6550}
     assert profiles["ml_premium"]["commission_bp"] == 1950

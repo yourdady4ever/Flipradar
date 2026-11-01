@@ -221,18 +221,18 @@ def cmd_clear_demo(args: argparse.Namespace, settings: Settings) -> int:
 
 def cmd_fx_refresh(args: argparse.Namespace, settings: Settings) -> int:
     from .collectors.base import CollectorError
-    from .services.fx import refresh_from_banxico
+    from .services.fx import fx_refresh_enabled, refresh_usd_mxn
 
-    if not settings.banxico_token:
-        _err("Banxico is not configured: set FLIPRADAR_BANXICO_TOKEN (free token from banxico.org.mx).")
+    if not fx_refresh_enabled(settings):
+        _err("No FX source enabled: set FLIPRADAR_BANXICO_TOKEN (free) or FLIPRADAR_FX_PUBLIC_SOURCES_ENABLED=true.")
         return 1
     _setup(settings)
     session = SessionLocal()
     try:
-        row = asyncio.run(refresh_from_banxico(session, settings))
+        row = asyncio.run(refresh_usd_mxn(session, settings))
         session.commit()
     except CollectorError as exc:
-        _err(f"Banxico request failed: {exc}")
+        _err(f"FX request failed: {exc}")
         return 1
     finally:
         session.close()

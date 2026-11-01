@@ -6,7 +6,8 @@ A rule matches an opportunity when ALL of its set conditions hold:
 * brand / category equal (case-insensitive) to the product's (or buy listing's) brand / category;
 * ``net_profit >= min_profit_cents``, ``roi >= min_roi_bp``, ``score >= min_score``,
   ``buy_total <= max_buy_cents``, ``confidence >= min_confidence`` (low < medium < high);
-* ``exclude_suspicious``: no warning/critical risk flag on the opportunity and buy listing not suspicious.
+* ``exclude_suspicious``: neither the opportunity nor its buy listing is suspicious (any critical flag or
+  two or more warnings - see ``engine.risk.is_suspicious``).
 
 Only actionable opportunities (status new/seen/watching) are considered; demo opportunities only when
 ``include_demo_data`` is on.  One notification per (rule, opportunity) - re-evaluating never duplicates.
@@ -25,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import Settings, get_settings
+from ..engine.risk import is_suspicious
 from ..models import AlertRule, Listing, Notification, Opportunity, OpportunityStatus, Product
 from . import notify, settings_store
 
@@ -32,7 +34,6 @@ log = logging.getLogger(__name__)
 
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 ACTIONABLE = frozenset({OpportunityStatus.NEW.value, OpportunityStatus.SEEN.value, OpportunityStatus.WATCHING.value})
-SUSPICIOUS = frozenset({"warning", "critical"})
 
 
 def fold(text: str | None) -> str:
@@ -54,9 +55,10 @@ def pct_bp(bp: int) -> str:
 
 
 def is_risky(opp: Opportunity, listing: Listing | None) -> bool:
+    """Same definition everywhere: engine.risk.is_suspicious (critical flag or >= 2 warnings)."""
     if listing is not None and listing.is_suspicious:
         return True
-    return any(isinstance(f, dict) and f.get("severity") in SUSPICIOUS for f in (opp.risk_flags_json or []))
+    return bool(opp.is_suspicious) or is_suspicious([f for f in (opp.risk_flags_json or []) if isinstance(f, dict)])
 
 
 def rule_matches(rule: AlertRule, opp: Opportunity, product: Product | None, listing: Listing | None) -> bool:

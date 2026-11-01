@@ -1,7 +1,7 @@
 """FX, import costs, scheduler and push notification channels."""
 
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import httpx
@@ -18,12 +18,17 @@ from tests.conftest import make_settings
 
 
 def test_latest_rate_prefers_newest_stored(db, settings):
-    assert fx.latest_usd_mxn(db, settings) is None
+    today = date(2026, 10, 31)
+    assert fx.latest_usd_mxn(db, settings, today=today) is None
     fx.store_rate(db, "USD", "MXN", "2026-10-29", Decimal("17.90"), "banxico")
     fx.store_rate(db, "USD", "MXN", "2026-10-30", Decimal("18.05"), "banxico")
     fx.store_rate(db, "USD", "MXN", "2026-10-30", Decimal("18.06"), "banxico")  # upsert same day
     assert db.query(FxRate).count() == 2
-    assert fx.latest_usd_mxn(db, settings) == (Decimal("18.06"), "banxico", "2026-10-30")
+    assert fx.latest_usd_mxn(db, settings, today=today) == (Decimal("18.06"), "banxico", "2026-10-30")
+    # Same date: the official rate wins over a public estimate; stale rates are ignored.
+    fx.store_rate(db, "USD", "MXN", "2026-10-30", Decimal("18.50"), "frankfurter_ecb")
+    assert fx.latest_usd_mxn(db, settings, today=today)[1] == "banxico"
+    assert fx.latest_usd_mxn(db, settings, today=date(2026, 11, 20)) is None
     with pytest.raises(ValueError):
         fx.store_rate(db, "USD", "MXN", "2026-10-30", Decimal("0"), "x")
 
@@ -32,6 +37,20 @@ def test_manual_rate_from_environment(tmp_path, db):
     s = make_settings(tmp_path, fx_usd_mxn_manual=17.5)
     rate, source, _ = fx.latest_usd_mxn(db, s)
     assert rate == Decimal("17.5") and source == "manual"
+
+
+def test_refresh_usd_mxn_chain_and_staleness(db, settings, monkeypatch):
+    from flipradar.collectors import fx_sources
+    from flipradar.collectors.base import CollectorError
+
+    async def fake_get(s, client=None):
+        return fx_sources.FxQuote(Decimal("18.10"), "2026-10-30", "frankfurter_ecb", "ECB", False)
+
+    monkeypatch.setattr(fx_sources, "get_usd_mxn", fake_get)
+    row = asyncio.run(fx.refresh_usd_mxn(db, settings, today=date(2026, 10, 31)))
+    assert (row.rate, row.source) == ("18.10", "frankfurter_ecb")
+    with pytest.raises(CollectorError, match="stale"):
+        asyncio.run(fx.refresh_usd_mxn(db, settings, today=date(2026, 12, 31)))
 
 
 def test_refresh_from_banxico(db, settings, monkeypatch):
@@ -90,15 +109,16 @@ def test_scheduler_tick_runs_due_searches_only(db, settings):
 
 
 def test_scheduler_refreshes_fx_at_most_every_12h(db, settings, monkeypatch):
-    from flipradar.collectors import banxico
+    from flipradar.collectors import fx_sources
 
     calls = []
 
-    async def fake_fetch(s, client=None):
+    async def fake_get(s, client=None):
         calls.append(1)
-        return "2026-10-31", Decimal("18.00")
+        return fx_sources.FxQuote(Decimal("18.00"), datetime.now(UTC).date().isoformat(), "banxico_fix", None, True)
 
-    monkeypatch.setattr(banxico, "fetch_usd_mxn_fix", fake_fetch)
+    monkeypatch.setattr(fx_sources, "get_usd_mxn", fake_get)
+    monkeypatch.setattr(scheduler, "_fx_last_attempt", None)
     configured = settings.model_copy(update={"banxico_token": "t"})
     now = datetime.now(UTC)
     assert asyncio.run(scheduler.tick(configured, now=now))["fx_refreshed"] == 1

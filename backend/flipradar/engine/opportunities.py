@@ -29,7 +29,7 @@ from .demand import Observations, estimate_demand
 from .explain import AnalysisContext, build_facts, render_explanation
 from .risk import assess_listing
 from .scoring import score_opportunity
-from .stats import comparable_stats, quantile, resale_price_cents, select_comparables
+from .stats import comparable_stats, condition_class, quantile, resale_price_cents, select_comparables
 from .types import ListingView, OpportunityCandidate, PriceStats, RiskFlag
 
 PRICING_STRATEGIES = {"competitive": "comparables_p25", "market": "comparables_median"}
@@ -109,8 +109,13 @@ def analyze_product(
     observations: Observations,
     *,
     now: datetime,
+    fee_models_by_condition: dict[str, FeeModel] | None = None,
 ) -> list[OpportunityCandidate]:
     """Evaluate every listing of a product as a BUY candidate against the others as RESALE comparables.
+
+    ``fee_models_by_condition`` optionally maps a condition class (``new`` | ``refurbished`` | ``used``)
+    to the fee model used to RESELL a unit bought in that condition (e.g. Mercado Libre charges different
+    shipping tiers and applies tax withholdings only to new items).  Missing classes use ``fee_model``.
 
     Returns only candidates that pass the profit/ROI thresholds, sorted by score descending.
     Pure function: same inputs -> same outputs.
@@ -160,11 +165,12 @@ def analyze_product(
         else:
             shipping = int(buy.shipping_mxn_cents or 0)
         price = int(buy.price_mxn_cents)
+        model = (fee_models_by_condition or {}).get(condition_class(buy.condition) or "", fee_model)
         inputs = ProfitInputs(
             buy_price_cents=price,
             buy_shipping_cents=shipping,
             sale_price_cents=expected,
-            fee=fee_model,
+            fee=model,
         )
         profit = calculate_profit(inputs)
         if profit.roi_bp is None or profit.margin_bp is None:
@@ -189,8 +195,8 @@ def analyze_product(
             estimate_method=method,
             sold_comparables=sold_count,
             comparable_sources=sources,
-            fee_profile_name=fee_model.name,
-            fee_profile_as_of=fee_model.as_of,
+            fee_profile_name=model.name,
+            fee_profile_as_of=model.as_of,
             shipping_assumed=shipping_assumed,
             break_even_sale_cents=break_even_sale_price(inputs),
             max_buy_price_cents=max_buy_price_for_roi(inputs, target_roi) if target_roi is not None else None,
@@ -199,7 +205,7 @@ def analyze_product(
         candidate = OpportunityCandidate(
             buy=buy,
             product_key=product_key,
-            fee_profile_key=fee_model.key,
+            fee_profile_key=model.key,
             stats=stats,
             expected_sale_cents=expected,
             buy_total_cents=price + shipping,

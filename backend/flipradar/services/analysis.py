@@ -4,9 +4,13 @@ For every product:
 
 1. **Risk pass** - for each listing, pick its comparables (engine ``select_comparables``), compute
    comparable stats when at least ``min_comparables`` exist and call ``engine.risk.assess_listing``.
-   Flags are persisted on the listing; ``warning``/``critical`` => ``Listing.is_suspicious``.
-2. **Opportunity pass** - ``engine.opportunities.analyze_product`` with the default fee profile, fresh
-   risk codes and the last 30 days of price observations.
+   Flags are persisted on the listing; ``engine.risk.is_suspicious`` (any critical flag or >= 2
+   warnings) => ``Listing.is_suspicious``.
+2. **Opportunity pass** - ``engine.opportunities.analyze_product`` with the resale fee profile chosen by
+   the buy listing's condition (``default_fee_profile_key`` for new/refurbished,
+   ``default_fee_profile_key_used`` for used/unknown), fresh risk codes and the last 30 days of price
+   observations.  Only listings from Mexican marketplace/manual sources are resale comparables
+   (``ListingView.resale_reference``); eBay US, deal feeds and single retailer pages are buy-side only.
 3. **Persist** - upsert Opportunity rows (unique per buy listing + fee profile).  User decisions are
    preserved (``seen``/``watching``/``dismissed``/``bought`` keep their status); opportunities that are no
    longer returned become ``expired`` unless the user bought or dismissed them.
@@ -44,6 +48,8 @@ from ..models import (
     OpportunityStatus,
     PriceObservation,
     Product,
+    Source,
+    SourceKind,
 )
 from ..schemas import RecomputeResult
 from . import alerts as alerts_service
@@ -56,15 +62,31 @@ from .timeutil import as_utc, utcnow
 log = logging.getLogger(__name__)
 
 OBSERVATION_WINDOW = timedelta(days=30)
-SUSPICIOUS_SEVERITIES = frozenset({"warning", "critical"})
 NEVER_EXPIRE = frozenset({OpportunityStatus.BOUGHT.value, OpportunityStatus.DISMISSED.value,
                           OpportunityStatus.EXPIRED.value})
 _COMPARE_FIELDS = ("buy_total_cents", "expected_sale_cents", "net_profit_cents", "roi_bp", "margin_bp", "score",
                    "confidence", "comparable_count", "risk_flags_json", "fee_profile_key")
 
 
-def default_fee_model(session: Session, settings: Settings | None = None) -> FeeModel:
-    key = settings_store.get_value(session, "default_fee_profile_key", settings)
+RESALE_SOURCE_KINDS = frozenset({SourceKind.MARKETPLACE.value, SourceKind.MANUAL.value, SourceKind.DEMO.value})
+
+
+def is_resale_reference(source: Source | None) -> bool:
+    """True when listings of ``source`` represent the Mexican RESALE market (comparables).
+
+    Mexican marketplaces and user-entered data (manual/CSV - e.g. Facebook Marketplace prices you
+    recorded) qualify.  Foreign marketplaces (eBay US), deal feeds and single retailer pages are
+    purchase-side evidence only.
+    """
+    if source is None:
+        return True
+    return source.kind in RESALE_SOURCE_KINDS and (source.country or "MX").upper() == "MX"
+
+
+def default_fee_model(
+    session: Session, settings: Settings | None = None, *, setting_key: str = "default_fee_profile_key"
+) -> FeeModel:
+    key = settings_store.get_value(session, setting_key, settings)
     row = session.scalars(select(FeeProfile).where(FeeProfile.key == key)).first()
     if row is None:
         row = session.scalars(select(FeeProfile).where(FeeProfile.key == "ml_clasica")).first()
@@ -126,6 +148,7 @@ def listing_view(listing: Listing, product_key: str | None, now: datetime) -> Li
         sold_quantity=listing.sold_quantity,
         is_demo=bool(listing.is_demo),
         attributes=attributes,
+        resale_reference=is_resale_reference(listing.source),
     )
 
 
@@ -141,7 +164,7 @@ def _assess_risk(views: list[ViewPair], a: AnalysisSettings, now: datetime) -> N
         flags: list[RiskFlag] = risk_engine.assess_listing(view, stats)
         flag_dicts = [jsonable(f.to_dict()) for f in flags]
         listing.risk_flags_json = flag_dicts
-        listing.is_suspicious = any(f.severity in SUSPICIOUS_SEVERITIES for f in flags)
+        listing.is_suspicious = risk_engine.is_suspicious(flags)
     # Second pass sees the fresh flags.
     for listing, view in views:
         view.attributes["risk_codes"] = _risk_codes(list(listing.risk_flags_json or []))
@@ -180,6 +203,8 @@ def _candidate_values(cand: OpportunityCandidate) -> dict[str, Any]:
         "cost_breakdown_json": jsonable(cand.profit),
         "score_components_json": [jsonable(c.to_dict()) for c in cand.components],
         "risk_flags_json": [jsonable(f.to_dict()) for f in cand.risk_flags],
+        "risk_level": risk_engine.risk_level(cand.risk_flags),
+        "is_suspicious": risk_engine.is_suspicious(cand.risk_flags),
         "demand_json": jsonable(cand.demand.to_dict()),
         "explanation": cand.explanation or "",
         "explanation_facts_json": jsonable(cand.facts or {}),
@@ -207,6 +232,7 @@ def analyze_one_product(
     fee_model: FeeModel,
     base_settings: AnalysisSettings,
     now: datetime,
+    fee_models_by_condition: dict[str, FeeModel] | None = None,
 ) -> tuple[list[Opportunity], int, int, int]:
     """Analyse one product.  Returns (created_or_changed_opps, created, updated, expired).  Flushes."""
     demo_product = is_demo_product_key(product.canonical_key)
@@ -229,7 +255,10 @@ def analyze_one_product(
     candidates: list[OpportunityCandidate] = []
     if views:
         observations = _observations(session, [v.id for v in views], now)
-        candidates = opp_engine.analyze_product(product.canonical_key, views, fee_model, a, observations, now=now)
+        candidates = opp_engine.analyze_product(
+            product.canonical_key, views, fee_model, a, observations, now=now,
+            fee_models_by_condition=fee_models_by_condition,
+        )
     candidates = [
         c for c in candidates
         if c.buy.id in listing_by_id and listing_by_id[c.buy.id].status == ListingStatus.ACTIVE.value
@@ -308,6 +337,8 @@ def recompute(
     now = as_utc(now or utcnow())
     base = settings_store.analysis_settings(session, settings)
     fee_model = default_fee_model(session, settings)
+    used_model = default_fee_model(session, settings, setting_key="default_fee_profile_key_used")
+    by_condition = {"new": fee_model, "refurbished": fee_model, "used": used_model}
     products = _products_to_analyze(session, product_ids)
 
     touched: list[Opportunity] = []
@@ -316,7 +347,7 @@ def recompute(
     for product in products:
         try:
             with session.begin_nested():  # one broken product must not abort the whole recompute
-                opps, c, u, e = analyze_one_product(session, product, fee_model, base, now)
+                opps, c, u, e = analyze_one_product(session, product, fee_model, base, now, by_condition)
         except NotImplementedError:
             raise
         except Exception:

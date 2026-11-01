@@ -93,11 +93,15 @@ def test_fx_latest_manual_and_stored(api, db):
     api.put("/api/v1/settings", json={"fx_usd_mxn_manual": "18.10"})
     r = api.get("/api/v1/fx/latest")
     assert r.status_code == 200 and r.json()["source"] == "manual" and r.json()["rate"] == "18.10"
-    db.add(FxRate(base="USD", quote="MXN", rate_date="2026-10-30", rate="17.4512", source="banxico"))
+    from datetime import UTC, datetime
+
+    today = datetime.now(UTC).date().isoformat()
+    db.add(FxRate(base="USD", quote="MXN", rate_date=today, rate="17.4512", source="banxico"))
     db.commit()
     r = api.get("/api/v1/fx/latest")
-    assert r.json() == {"base": "USD", "quote": "MXN", "rate": "17.4512", "rate_date": "2026-10-30", "source": "banxico"}
-    assert api.post("/api/v1/fx/refresh").status_code == 409  # Banxico not configured
+    assert r.json() == {"base": "USD", "quote": "MXN", "rate": "17.4512", "rate_date": today, "source": "banxico",
+                        "attribution": None}
+    assert api.post("/api/v1/fx/refresh").status_code == 409  # no Banxico token and public sources disabled
 
 
 def test_tracked_searches_crud(api, fake_collectors):

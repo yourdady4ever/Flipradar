@@ -70,7 +70,10 @@ def test_unclusterable_listing_has_no_product(db):
 
 
 def test_fx_conversion_uses_stored_rate(db):
-    db.add(FxRate(base="USD", quote="MXN", rate_date="2026-09-30", rate="18.1234", source="banxico"))
+    from datetime import UTC, datetime, timedelta
+
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).date().isoformat()  # stale rates are ignored
+    db.add(FxRate(base="USD", quote="MXN", rate_date=yesterday, rate="18.1234", source="banxico"))
     db.commit()
     _ingest(db, [RawListing(source_key="manual", external_id="u1", title="Camera", price_cents=10_000, currency="usd",
                             shipping_cents=2_000)])

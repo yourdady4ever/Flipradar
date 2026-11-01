@@ -20,21 +20,20 @@ def latest(db: Session = Depends(get_db), settings: Settings = Depends(get_setti
     if found is None:
         raise HTTPException(404, "no USD/MXN rate available (configure Banxico or set a manual rate)")
     rate, source, rate_date = found
-    return FxOut(base="USD", quote="MXN", rate=str(rate), rate_date=rate_date, source=source)
+    return FxOut(base="USD", quote="MXN", rate=str(rate), rate_date=rate_date, source=source,
+                 attribution=service.ATTRIBUTIONS.get(source))
 
 
 @router.post("/refresh", response_model=FxOut)
 async def refresh(db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> FxOut:
-    """Fetch the latest Banxico FIX rate now (requires FLIPRADAR_BANXICO_TOKEN)."""
-    if not settings.banxico_token:
-        raise HTTPException(409, "Banxico is not configured (set FLIPRADAR_BANXICO_TOKEN)")
+    """Fetch the latest USD/MXN rate now: Banxico FIX (with FLIPRADAR_BANXICO_TOKEN), else key-less public
+    sources labelled as estimates."""
+    if not service.fx_refresh_enabled(settings):
+        raise HTTPException(409, "No FX source enabled (set FLIPRADAR_BANXICO_TOKEN or enable public sources)")
     try:
-        row = await service.refresh_from_banxico(db, settings)
-    except NotImplementedError as exc:
-        raise HTTPException(503, "Banxico connector not implemented yet") from exc
+        row = await service.refresh_usd_mxn(db, settings)
     except CollectorError as exc:
-        raise HTTPException(502, f"Banxico request failed: {str(exc)[:300]}") from exc
+        raise HTTPException(502, f"FX request failed: {str(exc)[:300]}") from exc
     db.commit()
-    if row is None:  # pragma: no cover - token checked above
-        raise HTTPException(409, "Banxico is not configured")
-    return FxOut(base=row.base, quote=row.quote, rate=row.rate, rate_date=row.rate_date, source=row.source)
+    return FxOut(base=row.base, quote=row.quote, rate=row.rate, rate_date=row.rate_date, source=row.source,
+                 attribution=service.ATTRIBUTIONS.get(row.source))

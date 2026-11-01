@@ -20,7 +20,6 @@ from ..models import CollectionRun, InventoryItem, Listing, Opportunity, Opportu
 from ..schemas import AnalyticsSummaryOut, TimeseriesOut, TimeseriesPoint
 from . import settings_store
 from .inventory import OPEN_STATUSES, total_cost_cents
-from .serialize import no_critical_risk
 from .timeutil import as_utc, utcnow
 
 OPEN_OPPORTUNITY_STATUSES = (OpportunityStatus.NEW.value, OpportunityStatus.SEEN.value, OpportunityStatus.WATCHING.value)
@@ -87,7 +86,7 @@ def summary(session: Session, days: int = 30, now: datetime | None = None, setti
         select(Opportunity, Source.key)
         .join(Listing, Listing.id == Opportunity.buy_listing_id)
         .join(Source, Source.id == Listing.source_id)
-        .where(Opportunity.status.in_(OPEN_OPPORTUNITY_STATUSES), no_critical_risk(Opportunity.risk_flags_json))
+        .where(Opportunity.status.in_(OPEN_OPPORTUNITY_STATUSES), Opportunity.is_suspicious.is_(False))
     )
     if not include_demo:
         opp_stmt = opp_stmt.where(Opportunity.is_demo.is_(False))

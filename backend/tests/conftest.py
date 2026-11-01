@@ -49,6 +49,7 @@ def make_settings(tmp_path, **overrides: Any) -> Settings:
         "llm_provider": "none",
         "fx_usd_mxn_manual": None,
         "banxico_token": None,
+        "fx_public_sources_enabled": False,  # tests never touch the network
         "ntfy_url": None,
         "ntfy_topic": None,
         "telegram_bot_token": None,
@@ -206,7 +207,8 @@ def fake_assess_listing(view: ListingView, stats: PriceStats | None) -> list[Ris
     return flags
 
 
-def fake_analyze_product(product_key, listings, fee_model, settings, observations, *, now) -> list[OpportunityCandidate]:
+def fake_analyze_product(product_key, listings, fee_model, settings, observations, *, now,
+                         fee_models_by_condition=None) -> list[OpportunityCandidate]:
     out: list[OpportunityCandidate] = []
     for buy in listings:
         if buy.status != "active" or (buy.is_demo and not settings.include_demo):
@@ -337,3 +339,29 @@ def fake_collectors(client):
 @pytest.fixture
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+# ------------------------------------------------------------------------------------------------
+# Hermetic tests: no outbound network (only loopback is allowed, for local test servers).
+# ------------------------------------------------------------------------------------------------
+
+import socket as _socket  # noqa: E402
+
+import pytest as _pytest  # noqa: E402
+
+_REAL_CONNECT = _socket.socket.connect
+
+
+def _guarded_connect(self, address):  # pragma: no cover - only triggers on a test bug
+    host = address[0] if isinstance(address, tuple) else address
+    if isinstance(host, str) and (host.startswith("127.") or host in ("localhost", "::1") or self.family == _socket.AF_UNIX):
+        return _REAL_CONNECT(self, address)
+    raise RuntimeError(f"test tried to open a network connection to {address!r}; mock it instead")
+
+
+@_pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    # Without a proxy every outbound connection goes through the guard (a loopback proxy would hide it).
+    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(_socket.socket, "connect", _guarded_connect)

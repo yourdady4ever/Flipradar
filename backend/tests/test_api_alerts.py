@@ -2,6 +2,7 @@
 
 from sqlalchemy import select
 
+from flipradar.engine.risk import is_suspicious, risk_level
 from flipradar.models import Listing, Notification, Opportunity, Product, Source
 from flipradar.services import alerts
 
@@ -25,6 +26,7 @@ def fabricate_opportunity(db, *, title="Apple iPhone 15 Pro 256GB", listing_titl
                       buy_total_cents=1_000_000, expected_sale_cents=1_350_000, net_profit_cents=profit, roi_bp=roi,
                       margin_bp=1741, score=score, confidence=confidence, comparable_count=7,
                       risk_flags_json=flags or [], status=status, is_demo=is_demo,
+                      risk_level=risk_level(flags or []), is_suspicious=is_suspicious(flags or []),
                       explanation_facts_json={"net_profit_cents": profit})
     db.add(opp)
     db.commit()
@@ -75,12 +77,20 @@ def test_rule_thresholds_and_exclusions(api, db, settings):
     low_profit = fabricate_opportunity(db, profit=50_000)
     low_conf = fabricate_opportunity(db, confidence="medium")
     suspicious = fabricate_opportunity(db, suspicious=True)
-    flagged = fabricate_opportunity(db, flags=[{"code": "seller_new_or_unrated", "severity": "warning", "message": "x"}])
+    # Two warnings => suspicious (engine.risk.is_suspicious); a single warning is still alerted.
+    flagged = fabricate_opportunity(db, flags=[
+        {"code": "seller_new_or_unrated", "severity": "warning", "message": "x"},
+        {"code": "off_platform_payment_or_contact", "severity": "warning", "message": "y"},
+    ])
+    one_warning = fabricate_opportunity(db, flags=[{"code": "seller_new_or_unrated", "severity": "warning", "message": "x"}])
+    critical = fabricate_opportunity(db, flags=[{"code": "replica_or_counterfeit", "severity": "critical", "message": "x"}])
     info_only = fabricate_opportunity(db, flags=[{"code": "shipping_unknown", "severity": "info", "message": "x"}])
     dismissed = fabricate_opportunity(db, status="dismissed")
     demo = fabricate_opportunity(db, is_demo=True)
-    created = alerts.evaluate(db, [low_profit, low_conf, suspicious, flagged, info_only, dismissed, demo], settings)
-    assert [n.opportunity_id for n in created] == [info_only.id]
+    created = alerts.evaluate(
+        db, [low_profit, low_conf, suspicious, flagged, one_warning, critical, info_only, dismissed, demo], settings
+    )
+    assert [n.opportunity_id for n in created] == [one_warning.id, info_only.id]
 
 
 def test_keywords_are_accent_insensitive_and_all_required(db, settings, api):

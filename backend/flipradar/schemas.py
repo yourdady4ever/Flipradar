@@ -44,6 +44,7 @@ class HealthOut(BaseModel):
     api_version: str = API_VERSION
     database: str
     time: datetime
+    auth_required: bool = True
 
 
 class AuthCheckOut(BaseModel):
@@ -587,6 +588,23 @@ class AlertRuleIn(BaseModel):
     enabled: bool = True
 
 
+class AlertRuleUpdate(BaseModel):
+    """Partial update: only fields that are sent change."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    keywords: str | None = Field(default=None, max_length=200)
+    brand: str | None = Field(default=None, max_length=80)
+    category: str | None = Field(default=None, max_length=80)
+    min_profit_cents: int | None = Field(default=None, ge=0)
+    min_roi_bp: int | None = Field(default=None, ge=0)
+    min_score: float | None = Field(default=None, ge=0, le=100)
+    max_buy_cents: int | None = Field(default=None, ge=0)
+    min_confidence: Literal["low", "medium", "high"] | None = None
+    exclude_suspicious: bool | None = None
+    channels: list[Literal["in_app", "ntfy", "telegram", "webhook"]] | None = None
+    enabled: bool | None = None
+
+
 class AlertRuleOut(AlertRuleIn, ORMModel):
     id: int
     created_at: datetime
@@ -633,9 +651,13 @@ class UrlCheckOut(BaseModel):
 class SettingsOut(BaseModel):
     min_comparables: int
     comparable_max_age_days: int
-    default_fee_profile_key: str
+    default_fee_profile_key: str  # resale profile for units bought new / refurbished
+    default_fee_profile_key_used: str  # resale profile for units bought used / unknown condition
     target_roi_bp: int
     min_profit_cents: int
+    min_roi_bp: int
+    pricing_strategy: Literal["competitive", "market"]
+    unknown_shipping_assumption_cents: int | None
     fx_usd_mxn_manual: str | None
     include_demo_data: bool
     ai_provider: str
@@ -646,8 +668,12 @@ class SettingsUpdate(BaseModel):
     min_comparables: int | None = Field(default=None, ge=2, le=100)
     comparable_max_age_days: int | None = Field(default=None, ge=1, le=365)
     default_fee_profile_key: str | None = None
+    default_fee_profile_key_used: str | None = None
     target_roi_bp: int | None = Field(default=None, ge=0, le=100000)
     min_profit_cents: int | None = Field(default=None, ge=0)
+    min_roi_bp: int | None = Field(default=None, ge=0, le=100000)
+    pricing_strategy: Literal["competitive", "market"] | None = None
+    unknown_shipping_assumption_cents: int | None = Field(default=None, ge=0)
     fx_usd_mxn_manual: str | None = None
     include_demo_data: bool | None = None
 
@@ -658,3 +684,4 @@ class FxOut(BaseModel):
     rate: str
     rate_date: str
     source: str
+    attribution: str | None = None  # must be displayed with the rate when present

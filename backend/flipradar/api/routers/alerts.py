@@ -2,36 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...models import AlertRule
-from ...schemas import AlertRuleIn, AlertRuleOut, Message
+from ...schemas import AlertRuleIn, AlertRuleOut, AlertRuleUpdate, Message
 from ...services.timeutil import as_utc
 from ..deps import get_db
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
-
-
-class AlertRuleUpdate(BaseModel):
-    """Partial AlertRuleIn: only the fields sent are changed (the merged rule is re-validated)."""
-
-    name: str | None = Field(default=None, min_length=1, max_length=120)
-    keywords: str | None = Field(default=None, max_length=200)
-    brand: str | None = Field(default=None, max_length=80)
-    category: str | None = Field(default=None, max_length=80)
-    min_profit_cents: int | None = Field(default=None, ge=0)
-    min_roi_bp: int | None = Field(default=None, ge=0)
-    min_score: float | None = Field(default=None, ge=0, le=100)
-    max_buy_cents: int | None = Field(default=None, ge=0)
-    min_confidence: Literal["low", "medium", "high"] | None = None
-    exclude_suspicious: bool | None = None
-    channels: list[Literal["in_app", "ntfy", "telegram", "webhook"]] | None = None
-    enabled: bool | None = None
 
 
 FIELDS = tuple(AlertRuleIn.model_fields)

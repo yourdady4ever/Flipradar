@@ -19,6 +19,8 @@ replica_or_counterfeit              critical  replica, clon, AAA, 1:1, generico,
 box_or_parts_only                   critical  "solo caja", "caja vacia", for-parts cues
 locked_or_reported                  critical  iCloud/FRP/Google account lock, reported/blacklisted
 price_far_below_market              crit/warn total price < 35 % / < 55 % of comparable median
+price_statistical_outlier           info      robust z-score < -3.5 (unusual, but a real arbitrage gap
+                                              is an outlier by definition - informational only)
 carrier_locked                      warning   "solo Telcel", "de compania", "bloqueado a AT&T"
 off_platform_payment_or_contact     warning   WhatsApp, phone numbers, e-mail, deposits, OXXO
 seller_new_or_unrated               warning   < 5 transactions, red/orange, < 90 days, > 10 % neg.
@@ -395,9 +397,9 @@ def _price_flag(listing: ListingView, stats: PriceStats | None) -> RiskFlag | No
         )
     if z is not None and Decimal(str(z)) < PRICE_Z_THRESHOLD:
         return RiskFlag(
-            "price_far_below_market",
-            "warning",
-            described + f"; robust z-score {z} is an extreme low outlier.",
+            "price_statistical_outlier",
+            "info",
+            described + f"; robust z-score {z} makes it an unusual low price for this product.",
             evidence,
         )
     return None
@@ -495,10 +497,26 @@ def assess_listing(listing: ListingView, stats: PriceStats | None) -> list[RiskF
     return sorted(flags, key=_severity_key)
 
 
-def risk_level(flags: list[RiskFlag]) -> str:
-    """'none' | 'info' | 'warning' | 'critical' (max severity)."""
+#: Two or more independent warnings make a listing suspicious even without a critical flag.
+SUSPICIOUS_WARNING_COUNT = 2
+
+
+def is_suspicious(flags: list[RiskFlag] | list[dict]) -> bool:
+    """Single definition of "suspicious" used by listings, opportunities, filters and alerts:
+    any ``critical`` flag, or at least :data:`SUSPICIOUS_WARNING_COUNT` ``warning`` flags.
+
+    A lone warning (e.g. a price at 50 % of market, or a new seller) is shown as a warning badge but does
+    not hide the opportunity - an arbitrage deal is below market by definition.
+    """
+    severities = [f.get("severity") if isinstance(f, dict) else f.severity for f in flags]
+    return "critical" in severities or severities.count("warning") >= SUSPICIOUS_WARNING_COUNT
+
+
+def risk_level(flags: list[RiskFlag] | list[dict]) -> str:
+    """'none' | 'info' | 'warning' | 'critical' (max severity).  Accepts RiskFlag objects or dicts."""
     level = "none"
     for flag in flags:
-        if SEVERITY_RANK.get(flag.severity, 0) > SEVERITY_RANK[level]:
-            level = flag.severity
+        severity = flag.get("severity") if isinstance(flag, dict) else flag.severity
+        if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK[level]:
+            level = severity
     return level

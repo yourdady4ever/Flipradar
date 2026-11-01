@@ -26,6 +26,9 @@ from .timeutil import as_utc, utcnow
 log = logging.getLogger(__name__)
 
 FX_REFRESH_INTERVAL = timedelta(hours=12)
+#: Minimum wait between FX attempts after a failure (avoids hammering blocked/failing sources).
+FX_RETRY_INTERVAL = timedelta(hours=1)
+_fx_last_attempt: datetime | None = None
 
 
 async def tick(settings: Settings, *, now: datetime | None = None) -> dict[str, int]:
@@ -34,16 +37,19 @@ async def tick(settings: Settings, *, now: datetime | None = None) -> dict[str, 
     counters = {"searches_run": 0, "fx_refreshed": 0}
     session = SessionLocal()
     try:
-        if settings.banxico_token:
+        global _fx_last_attempt
+        retry_ok = _fx_last_attempt is None or _fx_last_attempt + FX_RETRY_INTERVAL <= now
+        if fx.fx_refresh_enabled(settings) and retry_ok:
             try:
-                last = session.scalar(select(func.max(FxRate.fetched_at)).where(FxRate.source == "banxico"))
+                last = session.scalar(select(func.max(FxRate.fetched_at)))
                 if last is None or as_utc(last) + FX_REFRESH_INTERVAL <= now:
-                    if await fx.refresh_from_banxico(session, settings) is not None:
-                        counters["fx_refreshed"] = 1
+                    _fx_last_attempt = now
+                    await fx.refresh_usd_mxn(session, settings)
+                    counters["fx_refreshed"] = 1
                     session.commit()
-            except Exception:
+            except Exception as exc:
                 session.rollback()
-                log.exception("Banxico FX refresh failed")
+                log.warning("FX refresh failed (will retry in %s): %s", FX_RETRY_INTERVAL, exc)
         try:
             results = await collection.run_due_searches(session, settings=settings, now=now)
             counters["searches_run"] = len(results)

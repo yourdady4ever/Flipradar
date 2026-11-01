@@ -6,7 +6,7 @@ WARNING = [{"code": "price_far_below_market", "severity": "warning", "message": 
 CRITICAL = [{"code": "replica_or_counterfeit", "severity": "critical", "message": "replica"}]
 
 
-def test_risk_filter_hides_only_critical(api, db):
+def test_risk_filter_hides_suspicious_but_not_single_warnings(api, db):
     ok = fabricate_opportunity(db, score=50)
     warn = fabricate_opportunity(db, flags=WARNING, suspicious=True, score=60)
     crit = fabricate_opportunity(db, flags=CRITICAL, suspicious=True, score=70)

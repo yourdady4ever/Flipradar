@@ -318,6 +318,9 @@ class Opportunity(Base):
     cost_breakdown_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     score_components_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     risk_flags_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    risk_level: Mapped[str] = mapped_column(String(16), default="none", index=True)  # none|info|warning|critical
+    # engine.risk.is_suspicious: any critical flag or >= 2 warnings (hidden from default lists/alerts).
+    is_suspicious: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     demand_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     explanation: Mapped[str] = mapped_column(Text, default="")
     explanation_facts_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

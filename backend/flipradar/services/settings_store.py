@@ -31,6 +31,9 @@ DEFAULTS: dict[str, Callable[[Settings], Any]] = {
     "min_comparables": lambda s: int(s.min_comparables),
     "comparable_max_age_days": lambda s: int(s.comparable_max_age_days),
     "default_fee_profile_key": lambda s: "ml_clasica",
+    # Resale fee profile for units bought USED (or of unknown condition): Mercado Libre charges different
+    # shipping tiers and no tax withholding on used items for sellers with RFC.
+    "default_fee_profile_key_used": lambda s: "ml_clasica_used",
     "target_roi_bp": lambda s: 2000,
     "min_profit_cents": lambda s: 20000,
     "min_roi_bp": lambda s: 1000,
@@ -108,7 +111,7 @@ def _validate(key: str, value: Any) -> Any:
             value = int(value)
             if value < 0:
                 raise Invalid("unknown_shipping_assumption_cents cannot be negative")
-    elif key == "default_fee_profile_key":
+    elif key in ("default_fee_profile_key", "default_fee_profile_key_used"):
         value = str(value)
     return value
 

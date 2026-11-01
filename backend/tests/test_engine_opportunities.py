@@ -410,3 +410,25 @@ def test_input_listings_are_not_mutated():
     snapshot = [replace(item, attributes=dict(item.attributes), seller=dict(item.seller)) for item in listings]
     run(listings, fee=ML_LIKE)
     assert listings == snapshot
+
+
+def test_fee_model_selected_by_buy_condition():
+    from flipradar.finance.calculator import FeeModel as _FM
+
+    new_model = _FM(key="new_model", name="New", commission_bp=1000)
+    used_model = _FM(key="used_model", name="Used", commission_bp=0)
+    listings = [
+        ListingView(
+            id=i, source_key="ml", title="x", price_mxn_cents=p, shipping_mxn_cents=0, condition="used",
+            product_key="k", match_confidence=0.95, observed_at=NOW, seller_id=f"s{i}",
+        )
+        for i, p in [(1, 500_000), (2, 1_000_000), (3, 1_000_000), (4, 1_000_000), (5, 1_000_000)]
+    ]
+    settings = AnalysisSettings(min_comparables=3, min_profit_cents=0, min_roi_bp=0)
+    cands = analyze_product(
+        "k", listings, new_model, settings, {}, now=NOW,
+        fee_models_by_condition={"new": new_model, "used": used_model},
+    )
+    assert cands and all(c.fee_profile_key == "used_model" for c in cands)
+    best = next(c for c in cands if c.buy.id == 1)
+    assert best.net_profit_cents == 1_000_000 - 500_000

@@ -174,10 +174,12 @@ def test_price_far_below_market_warning_by_ratio():
     assert flag.evidence["ratio"] == 0.5
 
 
-def test_price_far_below_market_warning_by_robust_z_only():
+def test_statistical_outlier_is_informational_only():
     tight = robust_stats([990_000, 995_000, 1_000_000, 1_005_000, 1_010_000])  # MAD 5,000
-    flag = flags_by_code(make_listing(price_mxn_cents=900_000), tight)["price_far_below_market"]
-    assert flag.severity == "warning"
+    flags = flags_by_code(make_listing(price_mxn_cents=900_000), tight)
+    assert "price_far_below_market" not in flags  # 90 % of market is a normal arbitrage gap
+    flag = flags["price_statistical_outlier"]
+    assert flag.severity == "info"
     assert flag.evidence["ratio"] == 0.9
     assert flag.evidence["robust_z"] < -3.5
     assert {"ratio", "median_cents", "n"} <= set(flag.evidence)
@@ -301,3 +303,17 @@ def test_never_raises_on_missing_data():
                           seller=None, attributes=None)  # type: ignore[arg-type]
     codes = {f.code for f in assess_listing(listing, None)}
     assert {"seller_unknown", "shipping_unknown", "low_match_confidence", "condition_unknown"} <= codes
+
+
+def test_is_suspicious_definition():
+    from flipradar.engine.risk import is_suspicious
+    from flipradar.engine.types import RiskFlag
+
+    w = RiskFlag("a", "warning", "x")
+    c = RiskFlag("b", "critical", "x")
+    i = RiskFlag("c", "info", "x")
+    assert not is_suspicious([])
+    assert not is_suspicious([w, i, i])
+    assert is_suspicious([w, RiskFlag("d", "warning", "y")])
+    assert is_suspicious([c])
+    assert is_suspicious([{"severity": "critical"}])
