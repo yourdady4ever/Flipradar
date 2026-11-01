@@ -135,6 +135,7 @@ def update_opportunity(opportunity_id: int, body: OpportunityUpdate, db: Session
                 409, "this opportunity was bought (an inventory item references it); manage it from Inventory instead"
             )
     opp.status = body.status
+    opp.status_before_expiry = None  # an explicit user decision replaces the one remembered at expiry
     db.commit()
     return opportunity_out(opp)
 

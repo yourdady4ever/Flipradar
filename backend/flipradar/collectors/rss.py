@@ -8,14 +8,15 @@ RSS-Bridge on the LAN), so they are not SSRF-filtered; they ARE size-capped (2 M
 
 Prices are extracted conservatively from the title (then the description) in Mexican formats such as
 ``$12,999``, ``$12,999.00``, ``MXN 12999``, ``$12 999 pesos``.  Amounts that are not the item price are
-ignored: installments ("12 MSI de $749", "$749 mensuales") and free-shipping thresholds ("envío gratis en
-compras mayores a $299").  An item is SKIPPED when there is no price, more than one distinct price (e.g.
+ignored: installments ("12 MSI de $749", "$749 mensuales"; "MSI" needs a count, as it is also a brand:
+"Laptop MSI por $15,999" is a price) and free-shipping thresholds ("envío gratis en compras mayores a $299").  An item is SKIPPED when there is no price, more than one distinct price (e.g.
 "antes $15,999 ahora $12,999"), a "desde"/"a partir de" (from) qualifier, a coupon/discount/savings
 amount ("cupón de $1,500", "$3,000 de descuento": is the other amount before or after it?), only
 US-dollar amounts, or a space-separated number that may be a model number plus a price
 ("Xbox 360 500 pesos", "Switch 2 999 pesos"; "$12 999" without "pesos"/"MXN" after it).  A space-grouped
 amount is read as one number only right after a currency marker ($, MXN), a delimiter (":", "(", " - ")
-or at the start of the text.  Nothing is guessed.
+or at the start of the text.  A 3-digit spec with a unit right after a price ("$999 128GB", "$99 100W",
+"$499 100%") is not a digit group of that price.  Nothing is guessed.
 """
 
 from __future__ import annotations
@@ -71,8 +72,14 @@ _CODE_FIRST = re.compile(r"\b(?:MXN|MN)\s?\$?\s?" + _NUM, re.IGNORECASE)
 _CODE_AFTER = re.compile(_NUM_SPACED + r"\s?(?:pesos\b|mxn\b|m\.n\.)", re.IGNORECASE)
 _USD_AFTER = re.compile(r"^\s?(?:usd|us\$|dls|dlls|d[oó]lares)\b", re.IGNORECASE)
 _USD_BEFORE = re.compile(r"(?:\bUS|U\$S|\bUSD)\s?$", re.IGNORECASE)
-# a short amount followed by a 3-digit group: "$12 999" (12,999?) or "$999 128GB" (999 and 128GB?)
-_GROUP_FOLLOWS = re.compile(r"[  ]\d{3}(?!\d)")
+# a short amount followed by a 3-digit group: "$12 999" (12 or 12,999?), "$12 999.00", "$12 999pesos",
+# "$12 999Envio" (words run together in a feed).  Only a known spec unit right after the group ("$999 128GB",
+# "$99 100W", "$499 100%", "$199 256 GB") shows it is a separate number and the amount is just "$999".
+_SPEC_UNIT = r"(?:gbps|gb|tb|mbps|mb|kb|ghz|mhz|hz|mah|wh|kw|w|mp|fps|dpi|rpm|mm|cm|ml|kg|pulgadas|pulg)"
+_SPACED_SPEC_UNIT = r"(?:gbps|gb|tb|mbps|ghz|mhz|hz|mah|pulgadas)"  # "256 GB" (no single letters)
+_GROUP_FOLLOWS = re.compile(
+    rf"[  ]\d{{3}}(?!\d)(?![  ]?%|{_SPEC_UNIT}\b|[  ]{_SPACED_SPEC_UNIT}\b)", re.IGNORECASE
+)
 # what may precede a space-grouped amount for it to be read as ONE number (text before it, right-stripped)
 _SPACED_ANCHOR = re.compile(r"(?:^|[$:(\[|=]|(?:^|\s)[-–—]|\b(?:MXN|MN)|M\.N\.)$", re.IGNORECASE)
 
@@ -85,9 +92,11 @@ _THRESHOLD_BEFORE = re.compile(
     r"(?:\b(?:compras?|pedidos?)\s+(?:(?:mayores|superiores|minimas)\s+(?:a|de)|de\s+mas\s+de|arriba\s+de"
     r"|desde|a\s+partir\s+de|de)|\benvio\s+gratis\s+(?:desde|a\s+partir\s+de|arriba\s+de))$"
 )
+# "12 MSI de", "18 meses de": a count is required before "msi"/"meses", because MSI is also a laptop and
+# GPU brand ("Laptop MSI por $15,999" is the item price).
 _INSTALLMENT_BEFORE = re.compile(
-    r"\b(?:msi|meses(?:\s+sin\s+intereses)?|mensualidades|pagos(?:\s+(?:fijos|mensuales|quincenales|semanales))?"
-    r"|quincenas|semanas)\s+(?:de|por|x)$"
+    r"(?:\b\d{1,2}\s*(?:msi|meses)|\bmeses\s+sin\s+intereses|\bmensualidades"
+    r"|\bpagos(?:\s+(?:fijos|mensuales|quincenales|semanales))?|\bquincenas|\bsemanas)\s+(?:de|por|x)$"
 )
 _INSTALLMENT_AFTER = re.compile(
     r"^(?:mensuales|al\s+mes|por\s+mes|x\s+mes|/\s*mes|quincenales|a\s+la\s+quincena|por\s+quincena"

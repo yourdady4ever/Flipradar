@@ -16,10 +16,19 @@ For every product:
 3. **Persist** - upsert Opportunity rows (unique per buy listing + fee profile).  User decisions are
    preserved (``seen``/``watching``/``dismissed``/``bought`` keep their status), also when the fee profile
    key changes (the existing row of the buy listing is re-keyed in place) or the listing moves to another
-   product; opportunities that are no longer returned become ``expired`` unless the user bought or
-   dismissed them.
+   product.  Opportunities that are no longer returned, or whose buy listing was not seen within the buy
+   window (also for products this recompute did not analyse), become ``expired`` unless the user bought or
+   dismissed them.  An opportunity that expired only because its buy listing was not seen recently (a gap
+   in the observations, not a market change) remembers a ``seen``/``watching`` status
+   (``status_before_expiry``) and gets it back when the listing is seen again; any other expired row that
+   comes back (e.g. the price rose and fell again) is ``new``.
 4. **Alerts** - created/changed opportunities are evaluated against alert rules (committed first,
    delivered afterwards so slow push channels never hold the SQLite write lock).
+
+Each product is analysed in its own short write transaction that takes SQLite's write lock FIRST
+(``bootstrap.begin_write``): a transaction that read first could not become a writer once another connection
+committed (SQLite answers "database is locked" at once), whereas this one waits up to ``busy_timeout``.  A
+product that fails is rolled back on its own and logged; the others are kept.
 
 Demo products (``demo|`` keys) are always analysed with ``include_demo=True`` so the synthetic dataset
 works, but they never share a cluster with real listings.
@@ -45,7 +54,7 @@ from ..engine.explain import fmt_money, fmt_pct_bp
 from ..engine.opportunities import AnalysisSettings
 from ..engine.types import ListingView, OpportunityCandidate, RiskFlag
 from ..finance.calculator import FeeModel
-from ..finance.import_costs import estimate_import_costs, select_rule
+from ..finance.import_costs import IMPORT_RULES, estimate_import_costs, select_rule
 from ..models import (
     FeeProfile,
     Listing,
@@ -59,7 +68,7 @@ from ..models import (
 )
 from ..schemas import RecomputeResult
 from . import alerts as alerts_service
-from . import settings_store
+from . import bootstrap, settings_store
 from .errors import Invalid
 from .ingestion import is_demo_product_key
 from .jsonutil import jsonable
@@ -70,6 +79,8 @@ log = logging.getLogger(__name__)
 OBSERVATION_WINDOW = timedelta(days=30)
 NEVER_EXPIRE = frozenset({OpportunityStatus.BOUGHT.value, OpportunityStatus.DISMISSED.value,
                           OpportunityStatus.EXPIRED.value})
+#: User statuses a stale-expired opportunity gets back when its buy listing is seen again (see :func:`_expire`).
+RESTORED_ON_RETURN = frozenset({OpportunityStatus.SEEN.value, OpportunityStatus.WATCHING.value})
 _COMPARE_FIELDS = ("buy_total_cents", "expected_sale_cents", "net_profit_cents", "roi_bp", "margin_bp", "score",
                    "confidence", "comparable_count", "risk_flags_json", "fee_profile_key")
 # Which row of a buy listing inherits a new fee profile key: the strongest user decision wins.
@@ -137,6 +148,8 @@ def import_estimate(listing: Listing) -> tuple[bool, int | None, str | None]:
     Items shipping from outside Mexico pay the courier-regime global rate on the customs value (item
     price + international shipping, USD) at the USD->MXN rate stored on the listing.  Duties are None
     (never guessed) when they cannot be estimated: formal import above the courier limit, or no USD price.
+    Without an international shipping quote the customs value is unknown (at least the item price), so the
+    highest courier rate that value can reach is used: missing shipping never selects a cheaper bracket.
     """
     origin = origin_country(listing)
     if origin == "MX":
@@ -148,25 +161,40 @@ def import_estimate(listing: Listing) -> tuple[bool, int | None, str | None]:
             "so no profit is estimated."
         )
     rate = Decimal(repr(listing.fx_rate))
-    shipping_usd = int(listing.shipping_cents or 0)
-    estimate = estimate_import_costs(int(listing.price_cents), shipping_usd, rule_key, rate,
+    shipping_known = listing.shipping_cents is not None
+    estimate = estimate_import_costs(int(listing.price_cents), int(listing.shipping_cents or 0), rule_key, rate,
                                      fx_source=listing.fx_source or "listing")
-    customs = f"customs value USD {Decimal(estimate['customs_value_usd_cents']) / 100:,.2f}"
-    shipping_text = "item + international shipping" if listing.shipping_cents is not None else (
-        "item only; international shipping not reported")
-    if select_rule(rule_key, estimate["customs_value_usd_cents"]).formal_import_required:
+    customs_usd = int(estimate["customs_value_usd_cents"])
+    customs = f"customs value USD {Decimal(customs_usd) / 100:,.2f}"
+    if select_rule(rule_key, customs_usd).formal_import_required:
         return True, None, (
             f"Ships from {origin}: {customs} is above the courier-regime limit, so a formal import is required "
             "and duties cannot be estimated; no profit is estimated."
         )
+    duties, duty_rate_bp = int(estimate["duties_mxn_cents"]), int(estimate["duty_rate_bp"])
+    if shipping_known:
+        shipping_text = "item + international shipping"
+    else:
+        # The real customs value is the item price PLUS a shipping charge the source did not report, so it may
+        # fall in a dearer bracket (USD 45 alone is exempt, USD 45 + 25 pays 17 %): use the highest courier
+        # rate it can reach (conservative), never the bracket of the item price alone.
+        duty_rate_bp = max(
+            rule.duty_rate_bp for rule in IMPORT_RULES[rule_key]
+            if not rule.formal_import_required
+            and (rule.max_value_usd_cents is None or rule.max_value_usd_cents >= customs_usd)
+        )
+        duties = int((Decimal(customs_usd) * rate * Decimal(duty_rate_bp) / Decimal(10_000))
+                     .to_integral_value(rounding=ROUND_HALF_UP))
+        shipping_text = ("item only; international shipping not reported, so the highest courier rate is applied "
+                         "and duties on the shipping are not included")
     note = (
-        f"Ships from {origin}: estimated import duties {fmt_money(estimate['duties_mxn_cents'])} = {customs} "
+        f"Ships from {origin}: estimated import duties {fmt_money(duties)} = {customs} "
         f"({shipping_text}) x {estimate['usd_mxn_rate']} MXN/USD ({estimate['fx_source']}) x "
-        f"{fmt_pct_bp(estimate['duty_rate_bp'])} global rate, rule '{estimate['rule_key']}' as of "
+        f"{fmt_pct_bp(duty_rate_bp)} global rate, rule '{estimate['rule_key']}' as of "
         f"{estimate['as_of'] or 'unknown'}. A customs processing fee (DTA) and carrier brokerage fees may "
         "still apply; not legal advice."
     )
-    return True, int(estimate["duties_mxn_cents"]), note
+    return True, duties, note
 
 
 def shipping_mxn_cents(listing: Listing) -> int | None:
@@ -404,11 +432,15 @@ def analyze_one_product(
         for name, value in values.items():
             setattr(opp, name, value)
         if opp.status == OpportunityStatus.EXPIRED.value:
-            opp.status = OpportunityStatus.NEW.value  # it is back on the market
+            # It is back on the market: the user's seen/watching decision returns with it, else it is new.
+            remembered = opp.status_before_expiry
+            opp.status = remembered if remembered in RESTORED_ON_RETURN else OpportunityStatus.NEW.value
+            opp.status_before_expiry = None
             changed = True
         if changed:
             updated += 1
             touched.append(opp)
+    stale_before = _stale_cutoff(a, now)
     for key, opp in existing.items():
         if key in returned or opp.status in NEVER_EXPIRE:
             continue
@@ -416,25 +448,37 @@ def analyze_one_product(
             owner = opp.buy_listing.product_id if opp.buy_listing is not None else None
             if owner is not None and owner != product.id:
                 continue  # the listing moved to another product, whose analysis takes this row over
-        opp.status = OpportunityStatus.EXPIRED.value
+        buy = opp.buy_listing
+        _expire(opp, stale=buy is not None and buy.last_seen_at is not None and as_utc(buy.last_seen_at) < stale_before)
         expired += 1
     session.flush()
     return touched, created, updated, expired
 
 
+def _stale_cutoff(a: AnalysisSettings, now: datetime) -> datetime:
+    """Buy listings last seen before this are stale (the engine's buy window, ``engine.opportunities``)."""
+    return now - timedelta(days=min(a.buy_max_age_days, a.comparable_max_age_days))
+
+
+def _expire(opp: Opportunity, *, stale: bool) -> None:
+    """Expire an open opportunity.  When it expires only because its buy listing was not seen recently
+    (``stale``: a gap in the observations, not a market change) a seen/watching decision is remembered and
+    restored when the listing is seen again (see ``analyze_one_product``)."""
+    opp.status_before_expiry = opp.status if stale and opp.status in RESTORED_ON_RETURN else None
+    opp.status = OpportunityStatus.EXPIRED.value
+
+
 def _expire_stale_buys(session: Session, a: AnalysisSettings, now: datetime) -> int:
     """Expire open opportunities whose buy listing was not seen within the buy window, also for products
-    this recompute did not analyse (the engine never returns such a listing as a candidate)."""
-    cutoff = now - timedelta(days=min(a.buy_max_age_days, a.comparable_max_age_days))
+    this recompute did not analyse (the engine never returns such a listing as a candidate).  A seen/watching
+    status is remembered and restored if the listing is seen again (see :func:`_expire`)."""
     stale = session.scalars(
         select(Opportunity)
         .join(Listing, Opportunity.buy_listing_id == Listing.id)
-        # A WATCHING opportunity keeps the user's decision: it is not swept (re-sighting would reset it to NEW).
-        .where(Opportunity.status.not_in(NEVER_EXPIRE | {OpportunityStatus.WATCHING.value}),
-               Listing.last_seen_at < cutoff)
+        .where(Opportunity.status.not_in(NEVER_EXPIRE), Listing.last_seen_at < _stale_cutoff(a, now))
     ).all()
     for opp in stale:
-        opp.status = OpportunityStatus.EXPIRED.value
+        _expire(opp, stale=True)
     session.flush()
     return len(stale)
 
@@ -449,10 +493,12 @@ def recompute(
 ) -> RecomputeResult:
     """Recompute risk + opportunities for ``product_ids`` (None = every product with listings).
 
-    Commits.  Alert notifications are created for new/changed opportunities and then delivered.
+    Commits (the caller's pending changes first, then one short write transaction per product, see the
+    module docstring).  Alert notifications are created for new/changed opportunities and then delivered.
     """
     settings = settings or get_settings()
     now = as_utc(now or utcnow())
+    session.commit()  # every product below starts its own transaction, with the write lock taken first
     base = settings_store.analysis_settings(session, settings)
     fee_model = default_fee_model(session, settings)
     used_model = default_fee_model(session, settings, setting_key="default_fee_profile_key_used")
@@ -462,22 +508,32 @@ def recompute(
     touched: list[Opportunity] = []
     created = updated = expired = 0
     failed = 0
+    # Ids for the log: a failed product's rollback expires every loaded object.
+    labels = {id(product): (product.id, product.canonical_key) for product in products}
     for product in products:
         try:
-            with session.begin_nested():  # one broken product must not abort the whole recompute
-                opps, c, u, e = analyze_one_product(session, product, fee_model, base, now, by_condition)
+            bootstrap.begin_write(session)
+            opps, c, u, e = analyze_one_product(session, product, fee_model, base, now, by_condition)
+            session.commit()
         except NotImplementedError:
+            session.rollback()
             raise
-        except Exception:
+        except Exception:  # one broken product must not abort the whole recompute
+            session.rollback()  # also ends the transaction's read snapshot: the next product starts afresh
             failed += 1
-            log.exception("analysis failed for product %s (%s)", product.id, product.canonical_key)
+            log.exception("analysis failed for product %s (%s)", *labels[id(product)])
             continue
         touched.extend(opps)
         created += c
         updated += u
         expired += e
-    expired += _expire_stale_buys(session, base, now)
-    session.commit()
+    try:
+        bootstrap.begin_write(session)
+        expired += _expire_stale_buys(session, base, now)
+        session.commit()
+    except Exception:  # e.g. the database stayed locked: the products above are committed, the next run retries
+        session.rollback()
+        log.exception("expiring stale opportunities failed; the next recompute retries")
     if failed:
         log.warning("recompute: %d of %d product(s) failed; see the log", failed, len(products))
 

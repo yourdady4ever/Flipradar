@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from . import __version__
-from .api.deps import require_token, token_is_active
+from .api.deps import active_token_id, require_token
 from .api.routers import (
     alerts,
     analytics,
@@ -45,7 +45,7 @@ from .config import Settings, get_settings
 from .db import create_all, init_engine, session_scope
 from .security import (
     DEFAULT_MAX_BODY_BYTES,
-    DEFERRED_CLIENT_IP_KEY,
+    TOKEN_CHECKED_KEY,
     BodySizeLimitMiddleware,
     LocalRequestGuardMiddleware,
     RateLimiter,
@@ -165,20 +165,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.rate_limiter = RateLimiter(settings.rate_limit_per_minute, 60.0)
     _install_error_handlers(app)
 
+    async def resolve_token(token: str) -> int | None:
+        return await run_in_threadpool(active_token_id, token)
+
     async def authorize_upload(scope: Scope) -> bool:
-        """Token check for bodies larger than the default limit, run before any byte is read."""
+        """Token check for bodies larger than the default limit, run before any byte is read.  The rate
+        limiter has already checked (and counted) the token unless limiting is off."""
         if not settings.require_auth:
             return True
+        if TOKEN_CHECKED_KEY in scope:
+            return bool(scope[TOKEN_CHECKED_KEY])
         token = bearer_credentials(scope)
-        valid = token is not None and await run_in_threadpool(token_is_active, token)
-        client_ip = scope.get(DEFERRED_CLIENT_IP_KEY)
-        if not valid and client_ip is not None:
-            app.state.rate_limiter.hit(f"ip:{client_ip}")  # same accounting as require_token
-        return valid
+        return token is not None and await resolve_token(token) is not None
 
     # Middleware: the last added is the outermost.  Order, outermost first: security headers (on every
-    # response, incl. 413/429), rate limit, local-only guard (token-less mode), body size, CORS, routes.
+    # response), CORS (preflights are answered before any token, size or rate check, and 401/413/429
+    # responses carry the CORS headers a cross-origin dashboard needs to read them), rate limit,
+    # local-only guard (token-less mode), body size, routes.
+    app.add_middleware(BodySizeLimitMiddleware, default_limit=DEFAULT_MAX_BODY_BYTES,
+                       path_limits={CSV_IMPORT_PATH: CSV_UPLOAD_MAX_BODY_BYTES}, authorize=authorize_upload)
     origins = settings.cors_origin_list
+    if not settings.require_auth:
+        app.add_middleware(LocalRequestGuardMiddleware, allowed_hosts=settings.allowed_host_list,
+                           allowed_origins=origins)
+    app.add_middleware(RateLimitMiddleware, limiter=app.state.rate_limiter,
+                       trusted_proxies=settings.trusted_proxy_networks,
+                       token_prefix=f"{API_PREFIX}/" if settings.require_auth else None,
+                       token_exclude=(OPENAPI_URL,), resolve_token=resolve_token)
     if origins:
         app.add_middleware(
             CORSMiddleware,
@@ -187,15 +200,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
             allow_headers=["Authorization", "Content-Type"],
         )
-    app.add_middleware(BodySizeLimitMiddleware, default_limit=DEFAULT_MAX_BODY_BYTES,
-                       path_limits={CSV_IMPORT_PATH: CSV_UPLOAD_MAX_BODY_BYTES}, authorize=authorize_upload)
-    if not settings.require_auth:
-        app.add_middleware(LocalRequestGuardMiddleware, allowed_hosts=settings.allowed_host_list,
-                           allowed_origins=origins)
-    app.add_middleware(RateLimitMiddleware, limiter=app.state.rate_limiter,
-                       trusted_proxies=settings.trusted_proxy_networks,
-                       defer_prefix=f"{API_PREFIX}/" if settings.require_auth else None,
-                       defer_exclude=(OPENAPI_URL,))
     app.add_middleware(SecurityHeadersMiddleware, docs_paths=(DOCS_URL,))
 
     app.include_router(health.router)

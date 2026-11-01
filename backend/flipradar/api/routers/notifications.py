@@ -30,8 +30,12 @@ def list_notifications(
 
     Without ``since_id`` (or with 0) this is the newest page (the inbox).  With ``since_id > 0`` it is a
     forward cursor: the ``limit`` OLDEST notifications with ``id > since_id`` (still listed newest first),
-    so a poller that passes the highest id it has seen as the next ``since_id`` never skips notifications
+    so a poller that passes the highest id it has seen as the next ``since_id`` does not skip notifications
     when more than ``limit`` arrive between two polls.  A page shorter than ``limit`` means caught up.
+    Notification ids are AUTOINCREMENT (never reused after deletes such as ``clear-demo``).  Limits: ids
+    deleted before a database was upgraded to AUTOINCREMENT can be handed out once more, and a reset
+    (new) database starts again at 1: a poller whose cursor is above the newest id of the inbox
+    (``since_id=0``) should reset its cursor.
     """
     stmt = select(Notification).where(Notification.id > since_id)
     if unread_only:

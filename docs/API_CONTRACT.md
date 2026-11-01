@@ -70,8 +70,12 @@ Header row required.  Columns (case-insensitive): `title` (required), `price` (r
 
 Amounts: in `,`-delimited files use `.` for decimals (`12999.00`, `$12,999`, `1,234.50`); in
 `;`-delimited files (decimal-comma spreadsheets) `1.234,50` / `12999,00` are also accepted.  Ambiguous
-values (`12,50` in a `,` file, `1,234` in a `;` file), amounts above 10^12 centavos and cells longer than
-2,000 characters reject only their row (reported in `errors`).
+values (`12,50` in a `,` file; `$12,999`, `1,234` or `1.234` in a `;` file), amounts above 10^12 centavos
+and cells longer than 2,000 characters reject only their row (reported in `errors`).
+
+Opportunity status: a `PATCH` that moves a `bought` opportunity to any other status returns `409` while an
+inventory item references it.  Deleting that item does not change the status; to undo a purchase marked by
+mistake, delete the item, then `PATCH {"status": "new"}` (the clients' "Restore to new").
 
 Notifications: `since_id=0` returns the newest `limit` rows; `since_id=N>0` returns the OLDEST `limit`
 rows with id > N (listed newest first), so a poller never skips notifications.

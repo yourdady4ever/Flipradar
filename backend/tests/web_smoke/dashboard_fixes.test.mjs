@@ -16,9 +16,9 @@ import {
 const OPEN_STATUSES = new Set(['new', 'seen', 'watching']); // analytics OPEN_OPPORTUNITY_STATUSES
 
 test('dashboard#0: a bought or expired opportunity offers no status toggle that reopens it', () => {
-  for (const status of ['bought', 'expired']) {
-    assert.deepEqual(oppStatusActions(status), [], status);
-  }
+  assert.deepEqual(oppStatusActions('expired'), []);
+  // bought: only "Restore to new", which the server refuses (409) while inventory references it (round2.test.mjs)
+  assert.ok(oppStatusActions('bought').every((a) => a.to === 'new'));
   // unknown statuses get no actions either (never guess a transition)
   assert.deepEqual(oppStatusActions('something_else'), []);
   assert.deepEqual(oppStatusActions(undefined), []);

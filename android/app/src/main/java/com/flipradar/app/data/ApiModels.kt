@@ -419,6 +419,24 @@ data class OpportunityOut(
          */
         val STATUS_FILTERS: List<String?> = listOf(null, STATUS_ALL) + STATUSES
 
+        /** Status the "Restore to new" action sends, to undo a "Mark bought" made by mistake. */
+        const val STATUS_RESTORE = "new"
+
+        /**
+         * Target statuses the detail screen offers.  Expired gets none (a later recompute reopens it).  Bought gets
+         * only [STATUS_RESTORE]: the server refuses it (409) while an inventory item references the opportunity,
+         * so a real purchase never counts as open potential profit again.  Unknown statuses get none.
+         */
+        fun statusActions(status: String): List<String> = when (status) {
+            "new", "seen", "watching", "dismissed" -> listOf("watching", "dismissed")
+            "bought" -> listOf(STATUS_RESTORE)
+            else -> emptyList()
+        }
+
+        /** True when the server refused to reopen a bought opportunity: an inventory item still references it. */
+        fun isRestoreRefused(fromStatus: String, error: Throwable): Boolean =
+            fromStatus == "bought" && error is ApiException && error.httpStatus == 409
+
         fun parse(o: JSONObject) = OpportunityOut(
             id = o.long("id"),
             productId = o.long("product_id"),

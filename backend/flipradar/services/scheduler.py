@@ -2,6 +2,7 @@
 
 Every ``scheduler_tick_seconds`` it:
 
+* closes collection runs left ``running`` by a crash (``collection.close_stale_runs``);
 * runs tracked searches that are due (enabled and never run or older than their interval);
 * refreshes the Banxico FIX USD/MXN rate at most every 12 hours when a token is configured.
 
@@ -16,6 +17,7 @@ import logging
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..db import SessionLocal
@@ -37,6 +39,11 @@ async def tick(settings: Settings, *, now: datetime | None = None) -> dict[str, 
     counters = {"searches_run": 0, "fx_refreshed": 0}
     session = SessionLocal()
     try:
+        try:
+            await asyncio.to_thread(_close_stale_runs, session)
+        except Exception:
+            session.rollback()
+            log.exception("closing interrupted collection runs failed")
         global _fx_last_attempt
         retry_ok = _fx_last_attempt is None or _fx_last_attempt + FX_RETRY_INTERVAL <= now
         if fx.fx_refresh_enabled(settings) and retry_ok:
@@ -59,6 +66,12 @@ async def tick(settings: Settings, *, now: datetime | None = None) -> dict[str, 
     finally:
         session.close()
     return counters
+
+
+def _close_stale_runs(session: Session) -> int:
+    closed = collection.close_stale_runs(session)  # wall-clock age, not the tick's logical ``now``
+    session.commit()
+    return closed
 
 
 async def scheduler_loop(settings: Settings) -> None:

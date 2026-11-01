@@ -48,20 +48,28 @@ curl -s "$API/analytics/summary?days=30" -H "$H"
 ## CSV import format
 
 Upload as multipart field `file` to `POST /api/v1/import/csv` (optional query `source=<key>`).
-A header row is required. Columns are case-insensitive:
+A header row is required. Columns are case-insensitive, separated by `,` or `;` (the header row decides):
 
 | Column | Required | Notes |
 |---|---|---|
 | `title` | yes | Listing title as shown |
-| `price` | yes | Pesos, e.g. `12999.00` or `$12,999` |
+| `price` | yes | Pesos; the accepted formats depend on the delimiter (see below) |
 | `currency` | no | Default `MXN` |
-| `url`, `condition`, `shipping`, `brand`, `model`, `gtin`, `seller`, `location` | no | `condition`: new/used/refurbished/for_parts or Spanish equivalents |
-| `source` | no | Default `csv_import` |
+| `url`, `condition`, `shipping`, `brand`, `model`, `gtin`, `seller`, `location` | no | `condition`: new/used/refurbished/for_parts or Spanish equivalents; `shipping` uses the `price` formats |
+| `source` | no | Default: the `source` query parameter, else `manual` |
 | `external_id` | no | Default: hash of url/title |
 | `sold_quantity`, `available_quantity` | no | Integers, if you observed them |
-| `observed_at` | no | ISO date/datetime |
+| `observed_at` | no | ISO date/datetime (UTC when no offset) |
 
-Limits: 5 MB and 20,000 rows per file. Invalid rows are rejected individually with a reason.
+Amounts (`price`, `shipping`):
+
+* `,`-delimited files: `.` is the decimal point and `,` only groups thousands, e.g. `12999.00`,
+  `$12,999` or `1,234.50`. `12,50` is rejected as ambiguous.
+* `;`-delimited files (decimal-comma spreadsheets): `12999.00`, `12999,00`, `1.234,50` and `$12.999,00`
+  are accepted. `$12,999`, `1,234` and `1.234` are rejected as ambiguous; write `12999` or `12999,00`.
+
+Limits: 5 MB and 20,000 rows per file. Invalid rows (ambiguous or out-of-range amounts, oversized
+cells, ...) are rejected individually with a reason; the other rows are imported.
 
 
 ## Endpoint reference

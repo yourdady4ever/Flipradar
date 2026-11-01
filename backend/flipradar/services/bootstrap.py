@@ -126,6 +126,7 @@ def ensure_source(session: Session, key: str, *, name: str | None = None, kind: 
 ADDED_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
     ("inventory_items", "written_off_at",
      "UPDATE inventory_items SET written_off_at = updated_at WHERE status = 'written_off'"),
+    ("opportunities", "status_before_expiry", None),
 )
 
 
@@ -154,10 +155,68 @@ def ensure_added_columns(session: Session) -> list[str]:
     return added
 
 
+def begin_write(session: Session) -> None:
+    """Open the session's next transaction as a WRITER (SQLite: ``BEGIN IMMEDIATE``).
+
+    In WAL mode a transaction that READ first cannot become a writer once another connection has committed:
+    SQLite answers SQLITE_BUSY ("database is locked") at once and ``busy_timeout`` does not apply.  Taking the
+    write lock first makes the transaction wait up to ``busy_timeout`` for it instead.  Call it right after a
+    commit/rollback (no transaction open) and commit soon: other writers wait meanwhile.  A no-op when a
+    transaction is already open on the connection or the database is not SQLite.
+    """
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return
+    dbapi_connection = connection.connection.dbapi_connection
+    if dbapi_connection is not None and not dbapi_connection.in_transaction:
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
+def ensure_monotonic_notification_ids(session: Session) -> bool:
+    """Rebuild a SQLite ``notifications`` table created without AUTOINCREMENT (before the model asked for it).
+
+    Without AUTOINCREMENT SQLite gives a new row ``max(id) + 1``, so the ids of deleted newest rows are reused
+    and a poller's ``since_id`` cursor skips the new notifications.  The rows keep their ids; ids deleted BEFORE
+    this migration can still be handed out once more.  Runs in one transaction; returns True when rebuilt.
+    """
+    from ..models import Notification
+
+    connection = session.connection()
+    if connection.dialect.name != "sqlite":
+        return False  # server databases (identity/sequence ids) never reuse ids
+    ddl = connection.exec_driver_sql(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notifications'"
+    ).scalar()
+    if ddl is None or "AUTOINCREMENT" in ddl.upper():
+        return False
+    begin_write(session)
+    old_columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(notifications)")}
+    columns = ", ".join(c.name for c in Notification.__table__.columns if c.name in old_columns)
+    old_indexes = [row[0] for row in connection.exec_driver_sql(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'notifications' AND sql IS NOT NULL"
+    )]
+    connection.exec_driver_sql("ALTER TABLE notifications RENAME TO notifications_before_autoincrement")
+    for name in old_indexes:  # their names are needed by the new table's indexes
+        connection.exec_driver_sql(f'DROP INDEX "{name}"')
+    Notification.__table__.create(connection)
+    # Names come from the model and PRAGMA table_info, never from input.
+    connection.exec_driver_sql(
+        f"INSERT INTO notifications ({columns}) SELECT {columns} FROM notifications_before_autoincrement"  # noqa: S608
+    )
+    connection.exec_driver_sql("DROP TABLE notifications_before_autoincrement")
+    log.info("rebuilt the notifications table with AUTOINCREMENT ids (ids are never reused)")
+    return True
+
+
 def bootstrap(session: Session, settings: Settings | None = None) -> dict[str, int]:
-    """Add new columns, seed fee profiles and sources and restore rotated API tokens (flushed; caller commits)."""
+    """Migrate the schema (monotonic notification ids, added columns), seed fee profiles and sources, close
+    collection runs left 'running' by a crash and restore rotated API tokens (flushed; caller commits)."""
+    from .collection import close_stale_runs  # collection imports this module
+
+    ensure_monotonic_notification_ids(session)
     ensure_added_columns(session)
-    counts = {"fee_profiles": seed_fee_profiles(session), "sources": seed_sources(session)}
+    counts = {"fee_profiles": seed_fee_profiles(session), "sources": seed_sources(session),
+              "runs_closed": close_stale_runs(session)}
     if settings is not None:
         install_ml_token_persistence(session, settings)
     return counts

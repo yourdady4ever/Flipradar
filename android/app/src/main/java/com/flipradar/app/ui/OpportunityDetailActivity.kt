@@ -7,13 +7,15 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import com.flipradar.app.R
 import com.flipradar.app.data.AiSummaryOut
+import com.flipradar.app.data.ApiException
 import com.flipradar.app.data.OpportunityBuyIn
 import com.flipradar.app.data.OpportunityDetailOut
+import com.flipradar.app.data.OpportunityOut
 import com.flipradar.app.util.Async
 import com.flipradar.app.util.Formats
 import com.flipradar.app.util.Money
 
-/** Everything the server knows about one opportunity, with actions (open, watch, dismiss, buy, AI). */
+/** Everything the server knows about one opportunity, with actions (open, watch, dismiss, restore, buy, AI). */
 class OpportunityDetailActivity : BaseActivity() {
     companion object {
         const val EXTRA_ID = "opportunity_id"
@@ -75,13 +77,14 @@ class OpportunityDetailActivity : BaseActivity() {
         actions1.addView(button(getString(R.string.action_open_listing)) { openUrl(o.buyUrl) }, lp(0, WRAP, 1f))
         actions1.addView(button(getString(R.string.action_mark_bought)) { showBuyDialog(d) }, lp(0, WRAP, 1f))
         content.addView(actions1, lp().apply { topMargin = dp(8) })
-        // Bought / expired opportunities are final (the server refuses to reopen a bought one with 409).
-        if (o.status != "bought" && o.status != "expired") {
+        // Expired offers nothing; bought offers only "Restore to new" (409 while an inventory item references it).
+        val targets = OpportunityOut.statusActions(o.status)
+        if (targets.isNotEmpty()) {
             val actions2 = hbox()
-            actions2.addView(button(getString(R.string.action_watch)) { setStatus("watching") }, lp(0, WRAP, 1f))
-            actions2.addView(button(getString(R.string.action_dismiss)) { setStatus("dismissed") }, lp(0, WRAP, 1f))
+            for (to in targets) actions2.addView(button(statusActionLabel(to)) { setStatus(to, o.status) }, lp(0, WRAP, 1f))
             content.addView(actions2, lp())
         }
+        if (o.status == "bought") content.addView(muted(getString(R.string.detail_bought_note), 12f), lp())
 
         // ---- Buy listing -------------------------------------------------------------------------
         content.addView(sectionHeader(getString(R.string.detail_buy_listing)), lp())
@@ -201,8 +204,22 @@ class OpportunityDetailActivity : BaseActivity() {
         }
     }
 
-    private fun setStatus(status: String) {
-        call({ api -> api.setOpportunityStatus(id, status) }, toastErrors = true) { updated ->
+    private fun statusActionLabel(to: String): String = when (to) {
+        "watching" -> getString(R.string.action_watch)
+        "dismissed" -> getString(R.string.action_dismiss)
+        OpportunityOut.STATUS_RESTORE -> getString(R.string.action_restore_new)
+        else -> Labels.opportunityStatus(this, to)
+    }
+
+    private fun setStatus(status: String, from: String) {
+        val onError: (Throwable) -> Unit = { e ->
+            if (OpportunityOut.isRestoreRefused(from, e)) {
+                info(getString(R.string.restore_refused_title), getString(R.string.restore_refused, (e as ApiException).detail.orEmpty()))
+            } else {
+                showError(e, toast = true)
+            }
+        }
+        call({ api -> api.setOpportunityStatus(id, status) }, onError = onError) { updated ->
             toast(getString(R.string.status_changed, Labels.opportunityStatus(this, updated.status)))
             setResult(RESULT_OK)
             load()

@@ -123,7 +123,7 @@ def test_prefixed_space_grouped_amount_positive(text, cents):
         "MXN 12 999 iPhone 15",  # "12 999" without a pesos/MXN suffix: 12 or 12,999?
         "Monitor 27 $ 3 499",
         "Pantalla $12 999",
-        "Memoria USB $999 128GB",  # 999 or 999,128?
+        "Memoria USB $999 128 en oferta",  # 999 or 999,128?  ("$999 128GB" is a spec: see round 2 tests)
     ],
 )
 def test_prefixed_amount_followed_by_digit_group_is_ambiguous(text):

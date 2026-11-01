@@ -22,6 +22,10 @@
     <string name="action_mark_bought">Marcar como comprado</string>
     <string name="action_watch">Seguir</string>
     <string name="action_dismiss">Descartar</string>
+    <string name="action_restore_new">Restaurar como nueva</string>
+    <string name="detail_bought_note">Comprada: la compra se registra en Inventario y ya no cuenta como ganancia potencial abierta. ¿Se marcó como comprada por error? Elimina su artículo de inventario y luego toca «Restaurar como nueva».</string>
+    <string name="restore_refused_title">No se restauró</string>
+    <string name="restore_refused">%1$s\n\nSi se marcó como comprada por error, primero elimina su artículo de inventario y luego restáurala.</string>
     <string name="action_ai_summary">Resumen IA</string>
     <string name="any">Cualquiera</string>
     <string name="any_status">Cualquier estado</string>

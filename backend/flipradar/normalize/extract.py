@@ -625,6 +625,87 @@ def _word_spans(text: str, patterns: list[tuple[re.Pattern[str], str]]) -> list[
     return sorted((m.start(), m.end(), typ) for pattern, typ in patterns for m in pattern.finditer(text))
 
 
+#: Words that open an included item, also in English ("with MagSafe charging case", "w/ case").
+_INCLUSION_LEADS = V.INCLUSION_WORDS | {"with", "w", "and", "includes"}
+#: Words allowed between such a word and the accessory word ("con el estuche", "with MagSafe charging case").
+_INCLUDED_ITEM_MODIFIERS = frozenset(
+    {"el", "la", "los", "las", "un", "una", "its", "the", "a", "de", "original", "originales", "magsafe",
+     "charging", "carga", "wireless", "inalambrico", "inalambrica", "usb", "c", "lightning"}
+)
+
+
+def _introduced_as_included(text: str, pos: int) -> bool:
+    """An inclusion word opens the phrase that ends with the accessory word at ``pos``
+    ("with MagSafe charging case", "con el estuche de carga")."""
+    for tok in reversed(_prev_tokens(text, pos, 4)):
+        if tok in _INCLUSION_LEADS:
+            return True
+        if tok not in _INCLUDED_ITEM_MODIFIERS:
+            return False
+    return False
+
+
+#: "para"/"compatible": the band or case is sold for the device; "solo"/"reemplazo": only the part is sold.
+_PART_LISTING_RE = re.compile(
+    r"(?<!\w)(?:para|compatibles?|for|fits|solo(?!\sloop)|sola|solamente|unicamente|only|reemplazo|replacement|"
+    r"suelt[oa]s?)(?!\w)"
+)
+#: Only the watch itself has GPS/cellular/Bluetooth radios.
+_WATCH_RADIO_RE = re.compile(r"(?<!\w)(?:gps|cellular|celular|lte|esim|bluetooth|wifi)(?!\w)")
+_WATCH_SIZE_RE = re.compile(r"(?<![\w/])(3[8-9]|4[0-9]|5[01])mm(?!\w)")
+#: Band styles right after the band word: the title says which band the watch comes with ("Correa Loop
+#: Deportiva", "Pulso Deportivo", "Correa Ocean", "Correa Hibrida").
+_BAND_STYLES = frozenset(
+    {"deportiva", "deportivo", "deportivas", "sport", "loop", "ocean", "oceano", "alpine", "alpina", "trail",
+     "hibrida", "hibrido", "milanesa", "milanese", "eslabones", "link", "trenzada", "trenzado", "nike", "silicon",
+     "silicona", "nylon", "cuero", "piel", "magnetica", "fluoroelastomero"}
+)
+_CHARGING_WORDS = frozenset({"carga", "charging", "magsafe", "inalambrica", "inalambrico", "wireless", "usb", "lightning"})
+#: Words that describe the earbuds themselves (a charging case alone is none of these).
+_EARBUD_DEVICE_WORDS = frozenset(
+    {"audifonos", "auriculares", "earbuds", "headphones", "inalambricos", "inalambricas", "cancelacion", "anc",
+     "bluetooth", "audio", "sonido"}
+)
+
+
+def _watch_band_of_device(text: str, start: int, end: int) -> bool:
+    """The band word describes the band a watch is sold with ("Apple Watch Series 9 45mm GPS Correa
+    Deportiva"), not a band sold on its own ("Apple Watch Series 9 45mm Correa")."""
+    sizes = set(_WATCH_SIZE_RE.findall(text))
+    if re.search(r"\d/\d{2}mm", text) or len(sizes) > 1:
+        return False  # "41/45mm", "41mm 45mm": a band that fits several case sizes
+    if len([tok for tok in text[:start].split() if tok.isdigit() and 1 <= int(tok) <= 11]) > 1:
+        return False  # "Series 9 8 7": a compatibility list
+    if _WATCH_RADIO_RE.search(text) or _watch_materials(text):
+        return True  # GPS / cellular / an aluminium, steel or titanium case: only the watch has them
+    # "45mm Correa Loop Deportiva": the case size plus the style of the band the watch comes with
+    nxt = [tok for tok in text[end:].split()[:2] if tok != "de"][:1]
+    return len(sizes) == 1 and bool(nxt) and nxt[0] in _BAND_STYLES
+
+
+def _charging_case_of_device(text: str, start: int, end: int, model_end: int) -> bool:
+    """The charging case named after a description of the earbuds themselves ("AirPods 4 Audífonos
+    Inalámbricos ... Estuche de Carga USB-C").  "AirPods Pro 2 Estuche de carga" stays an accessory."""
+    if text[start:end] not in ("estuche", "case"):
+        return False  # "funda"/"carcasa": a protective cover
+    if not any(tok in _CHARGING_WORDS for tok in _prev_tokens(text, start, 1) + text[end:].split()[:3]):
+        return False  # a carrying/protective case, not the charging case
+    return any(tok in _EARBUD_DEVICE_WORDS for tok in text[model_end:start].split())
+
+
+def _standard_part_of_device(text: str, start: int, end: int, typ: str, category: str | None, model_end: int) -> bool:
+    """The family's standard in-box part (watch band, earbuds' charging case) mentioned while describing
+    the device.  These parts are part of the official product name ("Correa deportiva", "Estuche de carga
+    MagSafe"), so they only mean an accessory listing when nothing else in the title describes the device."""
+    if _PART_LISTING_RE.search(text):
+        return False
+    if category == "smartwatch" and typ == "strap":
+        return _watch_band_of_device(text, start, end)
+    if category == "audio" and typ == "case":
+        return _charging_case_of_device(text, start, end, model_end)
+    return False
+
+
 def detect_accessory(
     text: str,
     device_start: int | None,
@@ -632,17 +713,20 @@ def detect_accessory(
     has_storage: bool = False,
     source_category: str | None = None,
     device_end: int | None = None,
+    category: str | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """Decide whether normalized ``text`` sells an accessory rather than the device it mentions.
 
-    ``device_start``/``device_end`` delimit the recognised device/model name (None if none).  Returns
-    ``(is_accessory, accessory_type, reason)``.
+    ``device_start``/``device_end`` delimit the recognised device/model name (None if none) and
+    ``category`` is the device's category.  Returns ``(is_accessory, accessory_type, reason)``.
 
     After the device name, when the title gives no device details (no storage, no "consola"/"celular"
     style noun), any accessory word that is not introduced as an included item ("con funda",
-    "+ control", "juegos incluidos") makes the listing an accessory: "AirPods Pro 2 Estuche de carga",
-    "iPhone 15 Funda", "PS5 Slim Control".  Weak words describing the device's own part ("bateria 85",
-    "pantalla impecable", "lente 18-55mm") and the word "caja" (see ``EMPTY_BOX_CUES``) do not count.
+    "+ control", "juegos incluidos", "with MagSafe charging case") makes the listing an accessory:
+    "AirPods Pro 2 Estuche de carga", "iPhone 15 Funda", "PS5 Slim Control".  Weak words describing the
+    device's own part ("bateria 85", "pantalla impecable", "lente 18-55mm"), the word "caja" (see
+    ``EMPTY_BOX_CUES``) and the family's standard in-box part in a title that describes the device ("Apple
+    Watch Series 9 45mm GPS Correa Deportiva", see :func:`_standard_part_of_device`) do not count.
     """
     strong = _matches(text, _STRONG)
     weak = _matches(text, _WEAK)
@@ -673,9 +757,15 @@ def detect_accessory(
             for start, end, typ, is_strong in spans:
                 if start < model_end or typ == "empty_box":
                     continue
-                if _is_inclusion(text, start, digits=True, model_end=model_end) or _included_after(text, end):
+                if (
+                    _is_inclusion(text, start, digits=True, model_end=model_end)
+                    or _included_after(text, end)
+                    or _introduced_as_included(text, start)
+                ):
                     continue
                 if not is_strong and _describes_own_part(text, start, end):
+                    continue
+                if _standard_part_of_device(text, start, end, typ, category, model_end):
                     continue
                 return True, typ, f"accessory word ({typ}) after the device name and no device details"
         return False, None, None
@@ -784,28 +874,48 @@ def _is_filler(token: str) -> bool:
     return token in V.PREFIX_FILLERS or V.BRAND_RE.fullmatch(token) is not None or token in V.VARIANT_WORDS
 
 
-#: Second words of multi-word color names ("gris espacial", "blanco estelar") and "neon" (Switch Joy-Con).
-_COLOR_WORDS = frozenset({"espacial", "estelar", "natural", "neon"})
+#: Second words of multi-word color names ("gris espacial", "blanco estelar"), "neon" (Switch Joy-Con) and
+#: shade words ("azul celeste", "verde azulado", "negro mate").
+_COLOR_WORDS = frozenset(
+    {"espacial", "estelar", "natural", "neon", "celeste", "azulado", "azulada", "verdoso", "verdosa", "rojizo",
+     "rojiza", "claro", "clara", "oscuro", "oscura", "mate", "metalico", "metalica", "pastel"}
+)
 
 
 def _is_color_word(token: str) -> bool:
-    return token in _COLOR_WORDS or extract_color(token) is not None
+    """Color words including plural forms ("joycons blancos", "azules", "grises")."""
+    if token in _COLOR_WORDS or extract_color(token) is not None:
+        return True
+    return any(
+        token.endswith(plural) and len(token) > len(plural) + 2 and extract_color(token[: -len(plural)]) is not None
+        for plural in ("es", "s")
+    )
 
 
 _SIZE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?(?:gb|tb|in|mm|hz|mah|w)?")
+#: Condition scores: "10/10", "9.5/10".
+_SCORE_RE = re.compile(r"\d{1,2}(?:\.\d)?/10")
 
 
-def _known_token(token: str) -> bool:
-    """A word that describes a device listing (condition, color, edition, standard part...) rather
-    than naming something else (a game, a special edition, another product)."""
+def _describing_token(token: str) -> bool:
+    """A word that describes the unit or the sale (condition, color, edition, standard part, paperwork,
+    logistics...).  Unlike :func:`_known_token` it excludes generic prefix words ("super", "gran", "the")
+    that also start game titles."""
     return (
-        _is_filler(token)
-        or token in V.SUFFIX_FILLERS
+        token in V.SUFFIX_FILLERS
+        or token in V.LISTING_DESCRIPTION_WORDS
         or _SIZE_TOKEN_RE.fullmatch(token) is not None
+        or _SCORE_RE.fullmatch(token) is not None
         or _is_color_word(token)
         or any(p.fullmatch(token) for p, _typ in _STRONG)
         or any(p.fullmatch(token) for p, _typ in _WEAK)
     )
+
+
+def _known_token(token: str) -> bool:
+    """A word that describes a device listing (condition, color, edition, standard part, paperwork,
+    logistics...) rather than naming something else (a game, a special edition, another product)."""
+    return _is_filler(token) or _describing_token(token)
 
 
 def _model_end(text: str, hit: V.ModelHit | None) -> int | None:
@@ -831,14 +941,60 @@ def _words_until_inclusion(text: str, pos: int) -> list[str]:
     return words
 
 
+#: Articles and possessives that may open the phrase after "con"/"y" ("con un rayon", "con su caja").
+_PHRASE_ARTICLES = frozenset({"un", "una", "unos", "unas", "el", "la", "los", "las", "lo", "su", "sus", "mi"})
+_GAME_WORD_RE = re.compile(r"(?:video)?juegos?|games?")
+
+
+def _names_extra_item(words: list[str]) -> bool:
+    """The words of one "con ..."/"y ..." phrase name an extra item rather than describe the unit."""
+    if any(_GAME_WORD_RE.fullmatch(tok) for tok in words):
+        return True  # "y juegos", "con juego fisico"
+    for tok, nxt in zip(words, words[1:], strict=False):
+        if not _known_token(tok) and nxt.isdigit():
+            return True  # a numbered title: "Spiderman 2", "FC 25", "Mario Kart 8"
+    content = [tok for tok in words if tok not in _PHRASE_ARTICLES]
+    # The phrase is about the unit when its first word is a known describing word or a standard in-box item
+    # ("con detalle estetico", "con muy poco uso", "con base vertical", "y facturada", "y manuales");
+    # otherwise its unknown words name something else, usually a game ("con Spiderman", "y Astro Bot").
+    return bool(content) and not (_describing_token(content[0]) or content[0] in V.INBOX_ITEM_WORDS)
+
+
 def _named_extra_item(text: str, model_end: int) -> bool:
     """A console listing that names an extra item after "con"/"y"/"+" ("con Spiderman 2", "y FC 25"):
-    the extra (usually a game) is not part of the standard console."""
+    the extra (usually a game) is not part of the standard console.  Descriptions of the unit itself
+    ("con detalle estetico", "con ticket de compra", "nueva sellada y facturada") are not extra items."""
     for m in re.finditer(r"(?<!\w)(?:con|y|mas|\+|e|incluye)(?!\w)", text[model_end:]):
-        following = _words_until_inclusion(text, model_end + m.end())
-        if any(not _known_token(tok) for tok in following):
+        if _names_extra_item(_words_until_inclusion(text, model_end + m.end())):
             return True
     return False
+
+
+#: Words right after a Joy-Con mention that make it a Joy-Con listing ("Joy-Con par", "Joy-Con (L)/(R)").
+_CONTROLLER_LISTING_AFTER = frozenset(
+    {"par", "pares", "pair", "set", "l", "r", "izq", "der", "controller", "controllers"}
+)
+#: Consoles whose own Joy-Con colour names the console variant ("OLED blanco" = white Joy-Con).  Not the
+#: base "Nintendo Switch": that name is also the platform's, so "Nintendo Switch Neon Joy-Con" reads as a
+#: Joy-Con listing.
+_JOYCON_MODELS = frozenset({"switch oled"})
+
+
+def _standard_controllers_named(text: str, model: str | None, hit: V.ModelHit, model_end: int) -> bool:
+    """The console's own Joy-Con set named after a description of the console ("Nintendo Switch OLED
+    Blanco Joy-Con Blancos", "Nintendo Switch OLED Model White Joy-Con"): the in-box controllers, not a
+    Joy-Con listing.  Right after the model name ("Nintendo Switch OLED Joy-Con Neon") the title reads
+    like a Joy-Con listing for that console, the same way as "PS5 Dualsense Blanco", and stays one."""
+    if hit.rule != "joycon" or model not in _JOYCON_MODELS:
+        return False
+    between = text[model_end : hit.start].split()
+    if not between or any(tok in _CONTROLLER_LISTING_AFTER for tok in text[hit.end :].split()[:2]):
+        return False
+    return all(
+        (tok in _INCLUSION_LEADS or _known_token(tok))
+        and not any(p.fullmatch(tok) for p, _typ in (*_STRONG, *_WEAK))
+        for tok in between
+    )
 
 
 def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str, Any]:
@@ -877,6 +1033,7 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
         has_storage=device_storage,
         source_category=source_category,
         device_end=model_end,
+        category=category,
     )
     if primary is not None and primary.accessory_type and not accessory:
         accessory, acc_type, acc_reason = True, primary.accessory_type, f"{primary.model or primary.rule} is an accessory"
@@ -894,6 +1051,7 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
                 hit.accessory_type
                 and hit.start >= model_end
                 and not _is_inclusion(text, hit.start, digits=True, model_end=model_end)
+                and not _standard_controllers_named(text, model, hit, model_end)
             ):
                 accessory, acc_type = True, hit.accessory_type
                 acc_reason = f"{hit.model or hit.rule} ({hit.accessory_type}) named after the device: accessory listing"

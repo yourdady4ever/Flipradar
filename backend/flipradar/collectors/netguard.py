@@ -55,6 +55,10 @@ class UnsafeUrlError(CollectorError):
     """The URL (or a redirect target) is not allowed: bad scheme/port/credentials or non-public address."""
 
 
+class TooManyRedirects(UnsafeUrlError):
+    """The redirect limit was reached.  Not an unsafe address: callers report it with its own message."""
+
+
 class ResponseTooLarge(CollectorError):
     pass
 
@@ -113,17 +117,32 @@ async def http_client(
         await own.aclose()
 
 
+# Registered content codings that compress or transform the body (IANA HTTP Content Coding Registry).
+# Any other value - "identity", "none", a charset name sent by a misconfigured server - is treated as
+# identity, as httpx and browsers do; such bodies are still capped on the bytes received.
+_TRANSFORMING_CODINGS = frozenset({
+    "gzip", "x-gzip", "deflate", "br", "zstd", "compress", "x-compress", "pack200-gzip", "exi", "aes128gcm",
+    "dcb", "dcz",
+})
+
+
+def _compressions(response: httpx.Response) -> list[str]:
+    header = response.headers.get("content-encoding", "")
+    codings = (c.strip().lower() for c in header.split(","))
+    return [c for c in codings if c in _TRANSFORMING_CODINGS]
+
+
 def _content_decoder(response: httpx.Response) -> Any:
     """zlib decompressor for the response's ``Content-Encoding`` (None for identity).
 
     Only ONE gzip/deflate layer is accepted: stacked encodings ("gzip, gzip") multiply the compression
     ratio and br/zstd are not requested (see :data:`ACCEPT_ENCODING`)."""
-    header = response.headers.get("content-encoding", "")
-    codings = [c.strip().lower() for c in header.split(",") if c.strip() and c.strip().lower() != "identity"]
+    codings = _compressions(response)
     if not codings:
         return None
     if len(codings) > 1:
-        raise CollectorError(f"stacked content encoding '{header}' is not supported")
+        header = response.headers.get("content-encoding", "")
+        raise CollectorError(f"stacked content encoding '{header[:100]}' is not supported")
     if codings[0] in ("gzip", "x-gzip"):
         return zlib.decompressobj(zlib.MAX_WBITS | 16)
     if codings[0] == "deflate":
@@ -140,7 +159,7 @@ async def read_capped(response: httpx.Response, max_bytes: int = MAX_BODY_BYTES)
     if declared and declared.strip().isdigit() and int(declared) > max_bytes:
         raise ResponseTooLarge(f"response body is {int(declared)} bytes; the limit is {max_bytes} bytes")
     decoder = _content_decoder(response)
-    raw_deflate_fallback = response.headers.get("content-encoding", "").strip().lower() == "deflate"
+    raw_deflate_fallback = _compressions(response) == ["deflate"]
     buffer = bytearray()
     received = 0
 
@@ -490,7 +509,7 @@ async def guarded_get(
                     redirects=redirects,
                 )
         if len(redirects) >= max_redirects:
-            raise UnsafeUrlError(f"too many redirects (limit {max_redirects})")
+            raise TooManyRedirects(f"too many redirects (limit {max_redirects})")
         current = await validate_url(next_url, allowed_ports=ports, host_policy=host_policy)
         redirects.append(str(current))
         if before_redirect is not None:

@@ -4,7 +4,12 @@ Cost basis uses the item's *average* unit cost, ``total_cost / quantity`` with
 ``total_cost = unit_cost * quantity + extra_costs``, allocated **cumulatively**: after ``n`` units are sold
 the sales together carry ``round_half_up(total_cost * n / quantity)``, so each sale's basis is that target
 minus what earlier sales already carry and the sale that empties the item takes the remainder.  Invariant:
-``sum(sale.cost_basis_cents) + remaining_cost_cents(item) == total_cost_cents(item)``, always.
+``sum(sale.cost_basis_cents) + remaining_cost_cents(item) == total_cost_cents(item)``, whenever the earlier
+sales carry no more than the item's current cost allows.  When they carry more (a cost lowered after a sale -
+the release before the cost lock allowed that edit - or a centavo of rounding after sales were deleted), the
+difference would be negative: the sale is then costed at the average unit cost, and if the sales carry more
+than the whole cost the unsold units are valued at it too.  No cost basis, inventory value or write-off loss is
+ever negative (no profit above the sale price, no write-off "gain").
 
 * Once an item has sales its unit cost and extra costs are locked (409): the sold units were costed with
   them.  Delete the sales to change the cost, or record a late cost (e.g. an import-duty invoice) on the
@@ -81,8 +86,16 @@ def allocated_cost_cents(item: InventoryItem) -> int:
 
 
 def remaining_cost_cents(item: InventoryItem) -> int:
-    """Cost of the units not sold: total cost minus what the sales carry (reconciles to the centavo)."""
-    return total_cost_cents(item) - allocated_cost_cents(item)
+    """Cost of the units not sold: total cost minus what the sales carry (reconciles to the centavo).
+
+    Never negative: when the sales carry more than the total cost (cost lowered after a sale in a database
+    from the release without the cost lock) the unsold units are valued at the current average cost.
+    """
+    remaining = total_cost_cents(item) - allocated_cost_cents(item)
+    if remaining >= 0:
+        return remaining
+    unsold = max(0, int(item.quantity) - sum(int(s.quantity) for s in item.sales))
+    return cost_basis_for(item, unsold)
 
 
 def written_off_cost_cents(item: InventoryItem) -> int:
@@ -294,6 +307,11 @@ def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
     ).one())
     cumulative = cumulative_cost_cents(item, units_sold_before + units)
     cost_basis = cumulative - allocated_before
+    if cost_basis < 0:
+        # Earlier sales carry more than the current cost allows (see the module docstring): cost these units at
+        # the average cost instead of booking a negative basis (and a profit above the sale price).
+        cost_basis = cost_basis_for(item, units)
+        breakdown["cost_basis_source"] = "average cost (earlier sales carry more than the current total cost)"
     revenue = data.unit_price_cents * units
     net = revenue - fees - data.shipping_cents - taxes - data.other_costs_cents
     profit = net - cost_basis

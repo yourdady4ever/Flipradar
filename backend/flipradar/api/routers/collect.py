@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -29,6 +30,13 @@ UNSAFE_URL_MESSAGE = (
     "URL refused: it (or a redirect) points to a non-public or disallowed address. Only public http(s) "
     "sites on allowed ports, without user:password@, can be checked."
 )
+# "scheme://user:password@" - userinfo runs to the last "@" before the path, query or fragment.
+_USERINFO_RE = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/?#\s]*@")
+
+
+def redact_userinfo(text: str) -> str:
+    """``text`` with the ``user:password@`` part of every URL in it removed (for logging)."""
+    return _USERINFO_RE.sub(r"\1", text)
 
 
 @router.post("/collect", response_model=CollectResult)
@@ -60,8 +68,11 @@ async def check_url(body: UrlCheckIn, db: Session = Depends(get_db), settings: S
         result = await jsonld.check_url(url, settings)
     except NotImplementedError as exc:
         raise HTTPException(503, "URL check is not available yet") from exc
+    except netguard.TooManyRedirects as exc:  # not an unsafe address: say what happened
+        return UrlCheckOut(url=url, allowed_by_robots=False, found=False, message=str(exc)[:500])
     except netguard.UnsafeUrlError as exc:
-        log.info("check-url refused %s: %s", url[:200], exc)  # details stay in the server log
+        # The details stay in the server log, without any user:password@ the URL carried.
+        log.info("check-url refused %s: %s", redact_userinfo(url)[:200], redact_userinfo(str(exc)))
         raise HTTPException(400, UNSAFE_URL_MESSAGE) from exc
     except CollectorError as exc:
         return UrlCheckOut(url=url, allowed_by_robots=False, found=False, message=str(exc)[:500])

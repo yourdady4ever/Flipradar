@@ -675,6 +675,56 @@ SUFFIX_FILLERS: frozenset[str] = frozenset(
     }
 )
 
+#: Condition, cosmetic-defect, paperwork and logistics words of Mexican listings ("bien cuidado", "sin
+#: rayones", "buenas condiciones", "con ticket de compra", "entrega inmediata CDMX", "precio negociable").
+#: They describe the unit or the sale, never another product, so after a console name they keep the
+#: listing a console (extract._known_token).  Deliberately no game/franchise words: an unknown word after
+#: a bare console name still means "possibly a game or accessory".
+LISTING_DESCRIPTION_WORDS: frozenset[str] = frozenset(
+    {
+        # condition
+        "semi", "seminuevas", "cuidado", "cuidada", "cuidados", "cuidadas", "cuidadisimo", "cuidadisima",
+        "conservado", "conservada", "buenas", "buenos", "condicion", "condiciones", "estetico", "estetica",
+        "esteticos", "esteticas", "ligero", "ligera", "ligeros", "ligeras", "leve", "leves", "minimo", "minima",
+        "minimos", "minimas", "pequeno", "pequena", "pequenos", "pequenas", "muy", "casi", "poquito", "usos",
+        "limpio", "limpia", "intacto", "intacta", "nuevecito", "nuevecita", "flamante", "abierto", "abierta",
+        "revisado", "revisada", "probado", "probada", "drift",
+        # cosmetic defects ("con un rayon", "mini detalle", "marcas de uso")
+        "rayon", "rayones", "rayoncito", "rayoncitos", "rayita", "rayitas", "raya", "rayas", "rayado", "rayada",
+        "rayadura", "rayaduras", "rasguno", "rasgunos", "golpe", "golpes", "golpecito", "golpecitos", "marca",
+        "marcas", "marquita", "marquitas", "desgaste", "mancha", "manchas", "detallito", "detallitos", "esquina",
+        "esquinas",
+        # paperwork
+        "ticket", "tickets", "compra", "nota", "facturada", "facturado", "facturable", "garantizado",
+        "garantizada",
+        # logistics and sale terms
+        "cdmx", "df", "edomex", "gdl", "guadalajara", "monterrey", "mty", "puebla", "queretaro", "entrega",
+        "entregas", "inmediata", "inmediato", "personal", "envios", "hoy", "mismo", "dia", "precio",
+        "negociable", "negociables", "trato", "acepto", "cambios", "ofertas", "urge", "vendo", "remato",
+        "ocasion", "msi", "meses", "intereses", "ano", "anos", "semana", "semanas", "dias",
+        # grammar words inside such phrases ("todo lo original", "de compra", "en pantalla")
+        "lo", "de", "del", "a", "al", "un", "una", "el", "la", "los", "las",
+    }
+)
+
+#: In-box items that may follow "con"/"y" after a console ("con caja y manuales", "con grip").  Not in
+#: LISTING_DESCRIPTION_WORDS: right after a bare console name they are the item sold ("Nintendo Switch OLED
+#: Grip").
+INBOX_ITEM_WORDS: frozenset[str] = frozenset(
+    {"manual", "manuales", "instructivo", "instructivos", "empaque", "empaques", "grip", "correas"}
+)
+
+#: Cosmetic-defect nouns.  "mini" right before one of them is the Spanish adjective ("mini detalle",
+#: "mini rayon": a tiny defect), not the iPhone/iPad mini model word.
+DEFECT_NOUNS: frozenset[str] = frozenset(
+    {
+        "detalle", "detalles", "detallito", "detallitos", "rayon", "rayones", "rayoncito", "rayoncitos", "rayita",
+        "rayitas", "raya", "rayas", "rayadura", "rayaduras", "rasguno", "rasgunos", "golpe", "golpes", "golpecito",
+        "golpecitos", "marca", "marcas", "marquita", "marquitas", "desgaste", "mancha", "manchas", "fisura",
+        "fisuras", "despostillado", "despostille", "defecto", "defectos",
+    }
+)
+
 # ------------------------------------------------------------------------------------------------
 # Generation / ordinal helpers
 # ------------------------------------------------------------------------------------------------
@@ -1800,6 +1850,11 @@ _SUFFIX_WINDOW_STOP = frozenset(
      "o", "vs", "regalo"}
 )
 _SUFFIX_WINDOW = 6
+#: Changer words that are also ordinary Spanish adjectives of the word after them.  Only checked when the
+#: changer does NOT come right after the model name ("iPhone 13 mini detalle" still reads as the 13 mini;
+#: "iPhone 13 128gb mini detalle en pantalla" is a 13 with a tiny defect).  "max" is not listed: "iPhone 15
+#: Pro 256gb Max ..." can be a Pro Max written in another order.
+_CHANGER_ADJECTIVES: dict[str, frozenset[str]] = {"mini": DEFECT_NOUNS}
 
 
 def _model_words(model: str) -> set[str]:
@@ -1819,12 +1874,18 @@ def _unconsumed_suffix(hit: ModelHit, text: str, window_end: int) -> str | None:
     if not changers or hit.model is None:
         return None
     consumed = _model_words(hit.model)
-    for count, tok in enumerate(re.finditer(r"\S+", text[hit.end : window_end])):
-        word = tok.group(0)
+    matches = list(re.finditer(r"\S+", text[hit.end : window_end]))
+    words = [tok.group(0) for tok in matches]
+    for count, word in enumerate(words):
         if count >= _SUFFIX_WINDOW or word in _SUFFIX_WINDOW_STOP:
             break
-        if word in changers and word not in consumed and not is_negated(text, hit.end + tok.start()):
-            return word
+        if word not in changers or word in consumed or is_negated(text, hit.end + matches[count].start()):
+            continue
+        if count > 0 and word in _CHANGER_ADJECTIVES and count + 1 < len(words) and (
+            words[count + 1] in _CHANGER_ADJECTIVES[word]
+        ):
+            continue  # "iPhone 13 128gb mini detalle": a tiny defect, not the 13 mini
+        return word
     return None
 
 

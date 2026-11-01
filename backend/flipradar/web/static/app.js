@@ -246,8 +246,10 @@ export function isAuthRejection(err) {
 }
 
 /**
- * Status changes the opportunity drawer offers.  A bought or expired opportunity gets none: watching or dismissing
- * it and then undoing that would leave it 'seen', so a purchase would count as open potential profit again.
+ * Status changes the opportunity drawer offers.  An expired one gets none (a later recompute reopens it).  A bought
+ * one gets only "Restore to new", to undo a "Mark bought" made by mistake: the server refuses it (409) while an
+ * inventory item still references the opportunity, so a real purchase never counts as open potential profit again.
+ * Watch / Dismiss stay hidden for it: undoing them would also leave it 'seen'.
  */
 export function oppStatusActions(status) {
   const watch = { label: 'Watch', to: 'watching', message: 'Watching this opportunity.', primary: true };
@@ -260,9 +262,18 @@ export function oppStatusActions(status) {
       return [{ label: 'Stop watching', to: 'seen', message: 'No longer watching.' }, dismiss];
     case 'dismissed':
       return [watch, { label: 'Restore', to: 'seen', message: 'Opportunity restored.' }];
+    case 'bought':
+      return [{ label: 'Restore to new', to: 'new', message: 'Opportunity restored to new (no longer marked bought).' }];
     default:
       return [];
   }
+}
+
+/** Error text for a failed status change.  A 409 on a bought opportunity means its purchase is still in Inventory. */
+export function oppStatusErrorText(err, fromStatus) {
+  const msg = err && err.message ? err.message : String(err);
+  if (!err || err.status !== 409 || fromStatus !== 'bought') return msg;
+  return `Not restored: ${msg}. If it was marked bought by mistake, delete its inventory item first, then restore it.`;
 }
 
 /**
@@ -1322,7 +1333,7 @@ function OpportunitiesView(main, initialRoute) {
 
 // Why a bought or expired opportunity offers no Watch / Dismiss (see oppStatusActions).
 const OPP_STATUS_NOTES = new Map([
-  ['bought', 'Bought: the purchase is tracked in Inventory and no longer counts as open potential profit in Analytics, so Watch and Dismiss are not offered. Use “Mark bought…” only to record another purchase.'],
+  ['bought', 'Bought: the purchase is tracked in Inventory and no longer counts as open potential profit in Analytics, so Watch and Dismiss are not offered. Marked bought by mistake? Delete its inventory item, then use “Restore to new”. Use “Mark bought…” only to record another purchase.'],
   ['expired', 'Expired: at the last recompute this listing no longer qualified as an opportunity. It reopens automatically if a later recompute finds it again.'],
 ]);
 
@@ -1394,7 +1405,12 @@ function createOppDrawer({ onChanged }) {
   }
 
   async function setStatus(d, status, message) {
-    await api(`/opportunities/${d.id}`, { method: 'PATCH', json: { status } });
+    try {
+      await api(`/opportunities/${d.id}`, { method: 'PATCH', json: { status } });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) throw new ApiError(409, oppStatusErrorText(err, d.status), err.detail);
+      throw err;
+    }
     toast(message, 'success');
     onChanged();
     if (openId === d.id) await open(d.id, { keepScroll: true });

@@ -9,6 +9,11 @@ run row is committed (status ``running``) before the collector is called, the co
 database state, and the results are ingested and the run finished in one short transaction afterwards.
 Every database step runs in a worker thread (``asyncio.to_thread``), so a step that has to wait for the
 lock never blocks the event loop that other requests and the scheduler share.
+
+A run committed as ``running`` is always finished: a collection cancelled during the network call (scheduler
+stop at shutdown/restart) records ``error`` ("interrupted") before the cancellation propagates, and runs left
+``running`` by a crash or a failed final write are closed by :func:`close_stale_runs` (scheduler tick and
+start-up) once they are older than :data:`STALE_RUN_AFTER`.
 """
 
 from __future__ import annotations
@@ -36,6 +41,10 @@ from .timeutil import as_utc, utcnow
 log = logging.getLogger(__name__)
 
 MAX_ERROR_LENGTH = 1000
+#: A run still ``running`` after this long was interrupted (crash, kill, a final write that failed): no collector
+#: call takes that long (HTTP timeouts and Retry-After waits are bounded), and another process's live run is safe.
+STALE_RUN_AFTER = timedelta(minutes=30)
+INTERRUPTED_MESSAGE = "interrupted (cancelled or shut down) before the results were stored"
 NO_SOURCE_MESSAGE = (
     "no enabled source with search support is configured; add credentials for a collector (see "
     "docs/DATA_SOURCES.md) or import data with CSV"
@@ -186,6 +195,43 @@ def _abort_run(session: Session, run: CollectionRun, source: Source | None, exc:
         log.warning("could not mark collection run %s as failed", run.id, exc_info=True)
 
 
+def _finish_interrupted(session: Session, run: CollectionRun, source: Source | None) -> None:
+    """Record a run whose task was cancelled during the network phase.  Never raises.
+
+    Runs synchronously: the task is being torn down, so it may not await a worker thread any more.  No other
+    database step of this session is in flight (the cancellation arrived while the collector awaited).
+    """
+    try:
+        session.rollback()
+        _finish(run, source, "error", INTERRUPTED_MESSAGE, utcnow())
+        session.commit()
+    except Exception:
+        session.rollback()
+        log.warning("could not mark interrupted collection run %s; close_stale_runs will", run.id, exc_info=True)
+
+
+def close_stale_runs(session: Session, now: datetime | None = None) -> int:
+    """Mark runs left ``running`` for longer than :data:`STALE_RUN_AFTER` as ``error`` (interrupted).
+
+    Flushes (the caller commits).  The source's last status is updated when the run is its most recent one.
+    """
+    now = as_utc(now or utcnow())
+    stale = session.scalars(
+        select(CollectionRun)
+        .where(CollectionRun.status == "running", CollectionRun.started_at < now - STALE_RUN_AFTER)
+        .order_by(CollectionRun.id)
+    ).all()
+    for run in stale:
+        source = session.get(Source, run.source_id) if run.source_id is not None else None
+        if source is not None and source.last_run_at is not None and as_utc(source.last_run_at) > as_utc(run.started_at):
+            source = None  # a later run of the source already finished: keep its status
+        _finish(run, source, "error", INTERRUPTED_MESSAGE, now)
+    if stale:
+        session.flush()
+        log.warning("closed %d collection run(s) left 'running' (interrupted)", len(stale))
+    return len(stale)
+
+
 def _record_no_source(session: Session, query: str, tracked_search_id: int | None) -> CollectionRun:
     run = CollectionRun(tracked_search_id=tracked_search_id, query=query[:200], started_at=utcnow(), status="running")
     session.add(run)
@@ -224,7 +270,11 @@ async def run_collection(
         runs.append((run, key))
         if run.status != "running":  # unknown or disabled source: already finished and committed
             continue
-        status, payload = await _fetch(key, query, limit, settings, client)
+        try:
+            status, payload = await _fetch(key, query, limit, settings, client)
+        except BaseException:  # cancelled (shutdown/restart) while the collector awaited: never leave it 'running'
+            _finish_interrupted(session, run, source)
+            raise
         try:
             touched |= await asyncio.to_thread(_close_run, session, run, source, key, status, payload, settings)
         except Exception as exc:  # e.g. the database stayed locked: record it, keep going with the others

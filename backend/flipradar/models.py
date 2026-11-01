@@ -326,6 +326,9 @@ class Opportunity(Base):
     explanation_facts_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(16), default=OpportunityStatus.NEW.value, index=True)
+    # The user's seen/watching status when the analysis expired the row; restored if the listing comes back.
+    # Added after the first release: services/bootstrap.ensure_added_columns adds it to existing databases.
+    status_before_expiry: Mapped[str | None] = mapped_column(String(16), nullable=True)
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -360,7 +363,13 @@ class AlertRule(Base):
 
 class Notification(Base):
     __tablename__ = "notifications"
-    __table_args__ = (UniqueConstraint("rule_id", "opportunity_id", name="uq_notification_rule_opp"),)
+    # AUTOINCREMENT: ids are never reused after the newest rows are deleted (clear-demo, cascades), so a poller's
+    # ``since_id`` cursor never skips a notification.  services/bootstrap.ensure_monotonic_notification_ids
+    # rebuilds tables created before this option existed.
+    __table_args__ = (
+        UniqueConstraint("rule_id", "opportunity_id", name="uq_notification_rule_opp"),
+        {"sqlite_autoincrement": True},
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     rule_id: Mapped[int | None] = mapped_column(ForeignKey("alert_rules.id", ondelete="SET NULL"), nullable=True)

@@ -14,7 +14,8 @@ Flow of :func:`check_url` (one page, only when the user asks for it):
    means ``found=False``.
 
 Only :class:`~.netguard.UnsafeUrlError` is raised (security rejection -> HTTP 400 in the API); every other
-outcome is reported in the returned :class:`UrlCheckResult`.
+outcome - including the redirect limit (:class:`~.netguard.TooManyRedirects`) - is reported in the
+returned :class:`UrlCheckResult`.
 """
 
 from __future__ import annotations
@@ -535,6 +536,8 @@ async def _load_robots(
             allowed_ports=allowed_ports,
             host_policy=_host_policy,
         )
+    except netguard.TooManyRedirects as exc:
+        return _RobotsEntry(robots_url, fixed=False, note=f"robots.txt could not be fetched ({exc}); page not fetched")
     except netguard.UnsafeUrlError:
         raise
     except (CollectorError, httpx.HTTPError) as exc:
@@ -681,6 +684,8 @@ async def check_url(url: str, settings: Settings, client: httpx.AsyncClient | No
             return UrlCheckResult(url=url, allowed_by_robots=True, found=False, message=str(exc))
         except RobotsDisallowed as exc:
             return UrlCheckResult(url=url, allowed_by_robots=False, found=False, message=str(exc))
+        except netguard.TooManyRedirects as exc:  # a long redirect chain, not an unsafe address
+            return UrlCheckResult(url=url, allowed_by_robots=True, found=False, message=f"page fetch failed: {exc}")
         except netguard.UnsafeUrlError:
             raise
         except (CollectorError, httpx.HTTPError) as exc:

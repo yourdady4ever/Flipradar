@@ -11,11 +11,13 @@ per token so read-heavy clients do not turn every request into a database write.
 Rate limiting
 -------------
 :class:`RateLimiter` is an in-memory sliding window (per process; not shared between workers).  It is
-meant to blunt brute force and runaway clients on a self-hosted single-process server.  Requests that
-carry a bearer token are counted per *verified token* (in :func:`flipradar.api.deps.require_token`), so
-anonymous traffic can never use up a valid client's budget; everything else - including requests with
-an invalid token - is counted per client address.  The address is the TCP peer, or, when the peer is
-listed in ``FLIPRADAR_TRUSTED_PROXIES``, the right-most untrusted ``X-Forwarded-For`` hop.
+meant to blunt brute force and runaway clients on a self-hosted single-process server.  Every request is
+counted by :class:`RateLimitMiddleware` before the app reads its body or routes it (so malformed bodies,
+unknown paths and wrong methods count too).  An API request that carries a *valid* bearer token is
+counted per token, so anonymous traffic can never use up a valid client's budget; everything else -
+including requests with an invalid token - is counted per client address.  The address is the TCP peer,
+or, when the peer is listed in ``FLIPRADAR_TRUSTED_PROXIES``, the right-most untrusted
+``X-Forwarded-For`` hop.  CORS preflights are answered by the CORS middleware before any of this.
 
 Request guards
 --------------
@@ -33,6 +35,7 @@ import hmac
 import ipaddress
 import json
 import math
+import re
 import secrets
 import threading
 import time
@@ -52,6 +55,8 @@ TOKEN_PREFIX = "fr_"  # noqa: S105 - public token prefix, not a secret
 DISPLAY_PREFIX_LEN = 8
 LAST_USED_WRITE_INTERVAL = timedelta(seconds=60)
 MAX_TOKEN_LENGTH = 256
+# The only shape generate_token() produces: anything else is refused without a database lookup.
+_TOKEN_SHAPE = re.compile(r"fr_[A-Za-z0-9_-]{43}")
 
 Scope = MutableMapping[str, Any]
 Message = MutableMapping[str, Any]
@@ -115,7 +120,7 @@ def revoke_token(session: Session, prefix: str) -> int:
 def verify_token(session: Session, token: str | None, *, now: datetime | None = None) -> ApiToken | None:
     """Return the active token row matching ``token`` or None.  May update ``last_used_at`` (flushed, not
     committed - the caller decides when to commit)."""
-    if not token or len(token) > MAX_TOKEN_LENGTH or not token.startswith(TOKEN_PREFIX):
+    if not token or len(token) > MAX_TOKEN_LENGTH or not _TOKEN_SHAPE.fullmatch(token):
         return None
     digest = hash_token(token)
     candidates = session.scalars(
@@ -203,9 +208,9 @@ class RateLimiter:
 
 
 IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
-# Scope key set by RateLimitMiddleware when the bearer-token check (and its rate limit) is left to
-# ``require_token``; the value is the client address used for invalid tokens.
-DEFERRED_CLIENT_IP_KEY = "flipradar.rate_limit_client_ip"
+# Scope key set by RateLimitMiddleware after it checked a request's bearer token: True when the token is
+# valid.  Later guards (the upload pre-authorization) reuse the answer instead of querying again.
+TOKEN_CHECKED_KEY = "flipradar.bearer_token_valid"  # noqa: S105 - ASGI scope key, not a secret
 TOO_MANY_REQUESTS = "Too many requests; slow down."
 
 
@@ -279,23 +284,38 @@ async def _send_json(send: Send, status: int, payload: dict[str, Any],
     await send({"type": "http.response.body", "body": body})
 
 
+TokenResolver = Callable[[str], Awaitable[int | None]]
+
+
 class RateLimitMiddleware:
     """Pure ASGI middleware returning ``429`` + ``Retry-After`` when a client exceeds the limit.
 
-    Requests are counted per client address (see :func:`client_ip`).  ``defer_prefix``: requests under
-    that path which carry a bearer token are not counted here - ``require_token`` counts them per verified
-    token, or per client address when the token is invalid - so anonymous floods (even through one shared
-    reverse-proxy address) cannot lock out clients holding a valid token."""
+    Every request is counted here, before the app reads its body or routes it, per client address (see
+    :func:`client_ip`).  ``token_prefix`` + ``resolve_token``: a request under that path that carries a
+    bearer token is first checked with ``resolve_token`` (token -> token id, or None when invalid) and,
+    when the token is valid, counted per token instead - so anonymous floods (even through one shared
+    reverse-proxy address) cannot lock out clients holding a valid token, while a made-up token is
+    charged to the client address like an anonymous request."""
 
     def __init__(self, app: ASGIApp, limiter: RateLimiter, *, exempt_prefixes: tuple[str, ...] = ("/static/",),
-                 trusted_proxies: Sequence[IPNetwork] = (), defer_prefix: str | None = None,
-                 defer_exclude: tuple[str, ...] = ()) -> None:
+                 trusted_proxies: Sequence[IPNetwork] = (), token_prefix: str | None = None,
+                 token_exclude: tuple[str, ...] = (), resolve_token: TokenResolver | None = None) -> None:
         self.app = app
         self.limiter = limiter
         self.exempt_prefixes = exempt_prefixes
         self.trusted_proxies = tuple(trusted_proxies)
-        self.defer_prefix = defer_prefix
-        self.defer_exclude = defer_exclude
+        self.token_prefix = token_prefix
+        self.token_exclude = token_exclude
+        self.resolve_token = resolve_token
+
+    async def _bucket(self, scope: Scope, path: str, ip: str) -> str:
+        token = bearer_credentials(scope)
+        if (token is None or self.resolve_token is None or not self.token_prefix
+                or not path.startswith(self.token_prefix) or path in self.token_exclude):
+            return "ip:" + ip
+        token_id = await self.resolve_token(token)
+        scope[TOKEN_CHECKED_KEY] = token_id is not None
+        return "ip:" + ip if token_id is None else f"token:{token_id}"
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or not self.limiter.enabled:
@@ -306,12 +326,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
         ip = client_ip(scope, self.trusted_proxies)
-        if (self.defer_prefix and path.startswith(self.defer_prefix) and path not in self.defer_exclude
-                and bearer_credentials(scope)):
-            scope[DEFERRED_CLIENT_IP_KEY] = ip
-            await self.app(scope, receive, send)
-            return
-        decision = self.limiter.hit("ip:" + ip)
+        decision = self.limiter.hit(await self._bucket(scope, path, ip))
         if decision.allowed:
             await self.app(scope, receive, send)
             return
@@ -339,7 +354,8 @@ class BodySizeLimitMiddleware:
       and the response is replaced by ``413``.
     * Paths whose limit is above ``default_limit`` (the CSV upload): when the body may exceed the default,
       ``authorize(scope)`` must accept the request first, so an anonymous client cannot make the server
-      buffer megabytes before being told ``401``.
+      buffer megabytes before being told ``401``.  Such per-path limits apply only to methods that carry
+      a body; GET/HEAD/OPTIONS (e.g. a CORS preflight) always get ``default_limit`` and no authorization.
     """
 
     def __init__(self, app: ASGIApp, *, default_limit: int = DEFAULT_MAX_BODY_BYTES,
@@ -354,7 +370,9 @@ class BodySizeLimitMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        limit = self.path_limits.get(scope.get("path", ""), self.default_limit)
+        limit = self.default_limit
+        if str(scope.get("method", "GET")).upper() not in SAFE_METHODS:
+            limit = self.path_limits.get(scope.get("path", ""), self.default_limit)
         too_large = {"detail": f"Request body too large (limit {limit} bytes)"}
         declared_text = _header(scope, b"content-length")
         declared: int | None = None

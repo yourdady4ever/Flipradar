@@ -24,6 +24,10 @@
     <string name="action_mark_bought">Mark as bought</string>
     <string name="action_watch">Watch</string>
     <string name="action_dismiss">Dismiss</string>
+    <string name="action_restore_new">Restore to new</string>
+    <string name="detail_bought_note">Bought: the purchase is tracked in Inventory and no longer counts as open potential profit. Marked bought by mistake? Delete its inventory item, then tap “Restore to new”.</string>
+    <string name="restore_refused_title">Not restored</string>
+    <string name="restore_refused">%1$s\n\nIf it was marked bought by mistake, delete its inventory item first, then restore it.</string>
     <string name="action_ai_summary">AI summary</string>
     <string name="any">Any</string>
     <string name="any_status">Any status</string>
