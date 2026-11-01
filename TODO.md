@@ -17,7 +17,8 @@ Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3*
   Amazon MX and Mercado Pago. Adjust the built-in profiles in the dashboard.
 - [ ] **Run the Android app on a real device:** setup, every screen, background notifications
   (Doze), and the dark theme.
-- [ ] **Confirm the GitHub Actions `android-gradle` job is green** (AGP 8.13 / Kotlin 2.2.20 / Gradle 8.14.3).
+- [x] **Confirm the GitHub Actions `android-gradle` job is green** (AGP 8.13 / Kotlin 2.2.20 / Gradle 8.14.3).
+  Done: green since CI run 10. Re-check it after dependency upgrades.
 
 ## P2: product improvements
 
@@ -31,7 +32,6 @@ Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3*
   are not estimated, and disable the dashboard's "Use duties" button in that case.
 - [ ] **`sqlite_autoincrement` on `notifications`,** so ids are never reused after deletes. The
   Android poller no longer depends on this.
-
 - [ ] **ML fee lookup in analysis.** When a token is configured, use `/sites/MLM/listing_prices`
   (already implemented in `MercadoLibreCollector.get_listing_fee`) to replace the profile's
   commission with the exact per-category rate. Cache the rate per category.
