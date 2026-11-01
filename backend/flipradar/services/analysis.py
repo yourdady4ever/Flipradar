@@ -429,7 +429,9 @@ def _expire_stale_buys(session: Session, a: AnalysisSettings, now: datetime) -> 
     stale = session.scalars(
         select(Opportunity)
         .join(Listing, Opportunity.buy_listing_id == Listing.id)
-        .where(Opportunity.status.not_in(NEVER_EXPIRE), Listing.last_seen_at < cutoff)
+        # A WATCHING opportunity keeps the user's decision: it is not swept (re-sighting would reset it to NEW).
+        .where(Opportunity.status.not_in(NEVER_EXPIRE | {OpportunityStatus.WATCHING.value}),
+               Listing.last_seen_at < cutoff)
     ).all()
     for opp in stale:
         opp.status = OpportunityStatus.EXPIRED.value
