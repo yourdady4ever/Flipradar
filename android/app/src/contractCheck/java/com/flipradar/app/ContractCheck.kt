@@ -37,7 +37,8 @@ fun main(args: Array<String>) {
     step("opportunities") {
         val page = api.opportunities(OpportunityQuery(includeSuspicious = true), 50, 0)
         check(page.items.isNotEmpty()) { "no opportunities (seed demo data first)" }
-        oppId = page.items.first().id
+        // Pick an OPEN opportunity: bought ones are protected by the server (409) by design.
+        oppId = (page.items.firstOrNull { it.status in setOf("new", "seen", "watching") } ?: page.items.first()).id
         "${page.total} total"
     }
     step("opportunity detail") {

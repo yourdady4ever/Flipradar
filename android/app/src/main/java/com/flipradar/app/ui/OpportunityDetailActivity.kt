@@ -75,10 +75,13 @@ class OpportunityDetailActivity : BaseActivity() {
         actions1.addView(button(getString(R.string.action_open_listing)) { openUrl(o.buyUrl) }, lp(0, WRAP, 1f))
         actions1.addView(button(getString(R.string.action_mark_bought)) { showBuyDialog(d) }, lp(0, WRAP, 1f))
         content.addView(actions1, lp().apply { topMargin = dp(8) })
-        val actions2 = hbox()
-        actions2.addView(button(getString(R.string.action_watch)) { setStatus("watching") }, lp(0, WRAP, 1f))
-        actions2.addView(button(getString(R.string.action_dismiss)) { setStatus("dismissed") }, lp(0, WRAP, 1f))
-        content.addView(actions2, lp())
+        // Bought / expired opportunities are final (the server refuses to reopen a bought one with 409).
+        if (o.status != "bought" && o.status != "expired") {
+            val actions2 = hbox()
+            actions2.addView(button(getString(R.string.action_watch)) { setStatus("watching") }, lp(0, WRAP, 1f))
+            actions2.addView(button(getString(R.string.action_dismiss)) { setStatus("dismissed") }, lp(0, WRAP, 1f))
+            content.addView(actions2, lp())
+        }
 
         // ---- Buy listing -------------------------------------------------------------------------
         content.addView(sectionHeader(getString(R.string.detail_buy_listing)), lp())

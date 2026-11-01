@@ -6,6 +6,7 @@ no side effects (no app, no database) so tests can build isolated apps with :fun
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -54,7 +55,7 @@ from .security import (
     bearer_credentials,
 )
 from .services import scheduler
-from .services.bootstrap import bootstrap
+from .services.bootstrap import bootstrap, persist_rotated_ml_token
 from .services.errors import Conflict, Invalid, NotFound
 from .services.imports import MAX_BYTES as CSV_MAX_BYTES
 from .services.timeutil import install_utc_listeners
@@ -148,6 +149,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await scheduler.stop(task)
+            # Never lose a rotated (single-use) Mercado Libre refresh token on shutdown.
+            await asyncio.to_thread(persist_rotated_ml_token)
 
     app = FastAPI(
         title="FLIP RADAR",

@@ -228,7 +228,7 @@
     <string name="sale_unit_price">Unit sale price (MXN)</string>
     <string name="sale_fees">Fees charged</string>
     <string name="sale_fees_hint">Blank = compute from fee profile</string>
-    <string name="sale_shipping">Shipping paid by you</string>
+    <string name="sale_shipping">Shipping paid by you (Mercado Libre: replaces the estimate; empty = estimate)</string>
     <string name="sale_taxes_withheld">Taxes withheld</string>
     <string name="sale_other_costs">Other costs</string>
     <string name="sale_net_proceeds">Net proceeds</string>

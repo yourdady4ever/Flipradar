@@ -22,7 +22,7 @@ minus what earlier sales already carry and the sale that empties the item takes 
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -97,7 +97,21 @@ def get_item(session: Session, item_id: int) -> InventoryItem:
     return item
 
 
+#: Clock skew tolerated for client-supplied dates (phones and servers are rarely perfectly in sync).
+FUTURE_DATE_TOLERANCE = timedelta(minutes=10)
+
+
+def _not_future(value: datetime | None, field: str) -> datetime | None:
+    if value is None:
+        return None
+    when = as_utc(value)
+    if when > utcnow() + FUTURE_DATE_TOLERANCE:
+        raise Invalid(f"{field} cannot be in the future")
+    return when
+
+
 def create_item(session: Session, data: InventoryIn) -> InventoryItem:
+    _not_future(data.purchased_at, "purchased_at")
     if data.product_id is not None and session.get(Product, data.product_id) is None:
         raise Invalid(f"product {data.product_id} does not exist")
     if data.opportunity_id is not None and session.get(Opportunity, data.opportunity_id) is None:
@@ -218,6 +232,7 @@ def _reserve_units(session: Session, item: InventoryItem, units: int) -> None:
 
 
 def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
+    _not_future(data.sold_at, "sold_at")
     units = int(data.quantity)
     if item.status in UNSELLABLE:
         raise Conflict(f"item is {item.status}; it cannot be sold")

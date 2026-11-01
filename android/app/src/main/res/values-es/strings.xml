@@ -226,7 +226,7 @@
     <string name="sale_unit_price">Precio unitario de venta (MXN)</string>
     <string name="sale_fees">Comisiones cobradas</string>
     <string name="sale_fees_hint">Vacío = calcular con el perfil</string>
-    <string name="sale_shipping">Envío pagado por ti</string>
+    <string name="sale_shipping">Envío pagado por ti (Mercado Libre: reemplaza la estimación; vacío = estimación)</string>
     <string name="sale_taxes_withheld">Impuestos retenidos</string>
     <string name="sale_other_costs">Otros costos</string>
     <string name="sale_net_proceeds">Ingreso neto</string>

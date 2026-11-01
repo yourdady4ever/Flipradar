@@ -104,6 +104,10 @@ def default_fee_model(
     key = settings_store.get_value(session, setting_key, settings)
     row = session.scalars(select(FeeProfile).where(FeeProfile.key == key)).first()
     if row is None:
+        fallback = settings_store.DEFAULTS[setting_key](settings or get_settings())
+        log.warning("fee profile %r (%s) not found; falling back to %r", key, setting_key, fallback)
+        row = session.scalars(select(FeeProfile).where(FeeProfile.key == fallback)).first()
+    if row is None:
         row = session.scalars(select(FeeProfile).where(FeeProfile.key == "ml_clasica")).first()
     if row is None:
         row = session.scalars(select(FeeProfile).order_by(FeeProfile.id)).first()

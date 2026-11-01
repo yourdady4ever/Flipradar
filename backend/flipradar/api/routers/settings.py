@@ -30,6 +30,7 @@ def settings_out(db: Session, settings: Settings) -> SettingsOut:
             None if values["unknown_shipping_assumption_cents"] is None
             else int(values["unknown_shipping_assumption_cents"])
         ),
+        buy_max_age_days=int(values["buy_max_age_days"]),
         fx_usd_mxn_manual=None if fx is None else str(fx),
         include_demo_data=bool(values["include_demo_data"]),
         ai_provider=settings.llm_provider,

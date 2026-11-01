@@ -35,6 +35,7 @@ from ..config import Settings
 from ..engine.types import MatchResult, NormalizedAttributes, RawListing
 from ..matching import matcher as matcher_mod
 from ..models import Condition, Listing, ListingStatus, PriceObservation, Product, Source
+from ..money import MAX_CENTS
 from ..normalize import extract as normalize_mod
 from . import fx as fx_service
 from .jsonutil import jsonable, truncate_json
@@ -132,6 +133,8 @@ def _validate(raw: RawListing) -> str | None:
         return "price must be an integer amount of centavos"
     if raw.price_cents <= 0:
         return "price must be greater than zero"
+    if raw.price_cents > MAX_CENTS or (isinstance(raw.shipping_cents, int) and raw.shipping_cents > MAX_CENTS):
+        return "amount is out of range"
     if not _CURRENCY_RE.match((raw.currency or "").upper()):
         return f"invalid currency {raw.currency!r}"
     if raw.shipping_cents is not None and (not isinstance(raw.shipping_cents, int) or raw.shipping_cents < 0):

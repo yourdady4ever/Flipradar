@@ -482,7 +482,9 @@ class SaleIn(BaseModel):
     channel: str | None = Field(default=None, max_length=64)
     fee_profile_key: str | None = None  # compute fees with the calculator
     fees_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # override: total fees actually charged
-    shipping_cents: int = Field(default=0, ge=0, le=MAX_CENTS)  # total shipping paid by seller
+    # Total shipping actually paid by the seller.  On Mercado Libre profiles a value > 0 REPLACES the
+    # profile's per-unit shipping tier (fixed fee); 0 keeps the profile estimate.
+    shipping_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     taxes_withheld_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)  # override
     other_costs_cents: int = Field(default=0, ge=0, le=MAX_CENTS)
     sold_at: datetime | None = None
@@ -664,6 +666,7 @@ class SettingsOut(BaseModel):
     min_roi_bp: int
     pricing_strategy: Literal["competitive", "market"]
     unknown_shipping_assumption_cents: int | None
+    buy_max_age_days: int = 3  # buy listings not seen within this many days never become opportunities
     fx_usd_mxn_manual: str | None
     include_demo_data: bool
     ai_provider: str
@@ -680,6 +683,7 @@ class SettingsUpdate(BaseModel):
     min_roi_bp: int | None = Field(default=None, ge=0, le=100000)
     pricing_strategy: Literal["competitive", "market"] | None = None
     unknown_shipping_assumption_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
+    buy_max_age_days: int | None = Field(default=None, ge=1, le=90)
     fx_usd_mxn_manual: str | None = None
     include_demo_data: bool | None = None
 

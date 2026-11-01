@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from ...ai import narrative
 from ...config import Settings
-from ...models import Listing, Opportunity, OpportunityStatus, Product, Source
+from ...models import InventoryItem, Listing, Opportunity, OpportunityStatus, Product, Source
 from ...money import MAX_CENTS
 from ...schemas import (
     MAX_ID,
@@ -128,6 +128,12 @@ def get_opportunity(opportunity_id: int, db: Session = Depends(get_db)) -> Oppor
 @router.patch("/{opportunity_id}", response_model=OpportunityOut)
 def update_opportunity(opportunity_id: int, body: OpportunityUpdate, db: Session = Depends(get_db)) -> OpportunityOut:
     opp = _get(db, opportunity_id)
+    if opp.status == "bought" and body.status != "bought":
+        linked = db.scalar(select(func.count()).select_from(InventoryItem).where(InventoryItem.opportunity_id == opp.id))
+        if linked:
+            raise HTTPException(
+                409, "this opportunity was bought (an inventory item references it); manage it from Inventory instead"
+            )
     opp.status = body.status
     db.commit()
     return opportunity_out(opp)

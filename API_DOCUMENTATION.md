@@ -959,6 +959,7 @@ Limits: 5 MB and 20,000 rows per file. Invalid rows are rejected individually wi
 | `min_roi_bp` | integer | yes |
 | `pricing_strategy` | "competitive" | "market" | yes |
 | `unknown_shipping_assumption_cents` | integer | null | yes |
+| `buy_max_age_days` | integer |  |
 | `fx_usd_mxn_manual` | string | null | yes |
 | `include_demo_data` | boolean | yes |
 | `ai_provider` | string | yes |
@@ -977,6 +978,7 @@ Limits: 5 MB and 20,000 rows per file. Invalid rows are rejected individually wi
 | `min_roi_bp` | integer | null |  |
 | `pricing_strategy` | "competitive" | "market" | null |  |
 | `unknown_shipping_assumption_cents` | integer | null |  |
+| `buy_max_age_days` | integer | null |  |
 | `fx_usd_mxn_manual` | string | null |  |
 | `include_demo_data` | boolean | null |  |
 
