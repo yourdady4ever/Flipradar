@@ -48,7 +48,7 @@ def _no_sleep(monkeypatch):
         ("iPhone 15 128GB $12,999", 1299900),
         ("PS5 Slim $12,999.00 en Liverpool", 1299900),
         ("Xbox Series S MXN 12999", 1299900),
-        ("Switch OLED 12 999 pesos", 1299900),
+        ("Switch OLED: 12 999 pesos", 1299900),  # space-grouped amounts must be anchored (": ", "$", start)
         ("MX$1,299 con cupón", 129900),
         ("Bocina 1,299 pesos y 5% de descuento", 129900),
         ("iPhone 15 128 GB a $13,499.50 MXN", 1349950),
@@ -136,13 +136,16 @@ def test_rss2_items_to_listings_skip_ambiguous():
     results = [rss.item_to_listing(item, FEED1, now=now) for item in items]
     listings = [listing for listing, _ in results if listing is not None]
     reasons = [reason for listing, reason in results if listing is None]
-    assert [listing.price_cents for listing in listings] == [799900, 1549900, 199900]
-    assert len(reasons) == 3
+    # "Kindle Paperwhite 1 999 pesos" is skipped: 1,999 or a "Paperwhite 1" at 999 (same shape as
+    # "iPhone 13 100 pesos"), see test_fix_collectors.py
+    assert [listing.price_cents for listing in listings] == [799900, 1549900]
+    assert len(reasons) == 4
     assert any("2 different prices" in r for r in reasons)
     assert any("'from'" in r for r in reasons)
     assert any("no MXN price" in r for r in reasons)
+    assert any("ambiguous space-separated amount" in r for r in reasons)
 
-    ps5, camera, kindle = listings
+    ps5, camera = listings
     assert ps5.source_key == "rss_deals" and ps5.currency == "MXN"
     assert ps5.condition_raw == "new"  # "Nueva y sellada" in description
     assert ps5.seller_name == "Liverpool"
@@ -156,7 +159,6 @@ def test_rss2_items_to_listings_skip_ambiguous():
     assert camera.condition_raw is None and camera.seller_name == "Tienda Foto"
     assert camera.attributes["price_extraction"] == "single price in description"
     assert camera.observed_at == now  # no date in the item
-    assert kindle.condition_raw is None  # "Nuevo precio mínimo" is not a condition
 
 
 def test_parse_atom_entries():
@@ -220,9 +222,9 @@ def test_search_across_feeds_filters_by_tokens():
         collector = rss.RssDealsCollector(settings)
         results = run(collector.search("camara SONY"))
         assert [listing.title for listing in results] == ["Cámara Sony Alpha a6400 kit"]
-        assert collector.last_skipped == {FEED1: 3, FEED2: 1}
+        assert collector.last_skipped == {FEED1: 4, FEED2: 1}
         everything = run(collector.fetch_latest())
-    assert len(everything) == 4
+    assert len(everything) == 3
 
 
 def test_429_retry_after_then_success(_no_sleep):
@@ -236,7 +238,7 @@ def test_429_retry_after_then_success(_no_sleep):
         )
         listings = run(rss.RssDealsCollector(settings).fetch_latest())
         assert route.call_count == 2
-    assert len(listings) == 3
+    assert len(listings) == 2
     assert _no_sleep == [60.0]  # capped
 
 
@@ -286,7 +288,7 @@ def test_health_per_feed_details():
         router.get(FEED2).mock(return_value=httpx.Response(404))
         health = run(rss.RssDealsCollector(settings).health())
     assert health.ok is False
-    assert health.details[FEED1] == {"ok": True, "priced_items": 3, "skipped_items": 3}
+    assert health.details[FEED1] == {"ok": True, "priced_items": 2, "skipped_items": 4}
     assert health.details[FEED2]["ok"] is False
 
 

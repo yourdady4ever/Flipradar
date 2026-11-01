@@ -62,7 +62,7 @@ class NotificationsActivity : BaseActivity() {
             adapter.replace(items)
             empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
             // Everything listed has been seen in-app: don't re-post these as system notifications.
-            items.maxOfOrNull { it.id }?.let { if (it > settings.lastSeenNotificationId) settings.lastSeenNotificationId = it }
+            settings.advanceNotificationCursor(items)
         }
     }
 

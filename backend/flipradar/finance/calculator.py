@@ -28,11 +28,20 @@ seller's tax regime (see SECURITY.md / docs/DATA_SOURCES.md for the sources of e
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
+import math
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+from fractions import Fraction
 from typing import Any
 
 BP = Decimal(10000)
+# |net profit - its linear trend| on a segment where no tier/threshold changes: five half-up rounded
+# line items (commission, payment fee, IVA on fees, ISR, IVA withheld) with the first two also scaled by
+# up to (1 + IVA) inside the IVA line gives at most 0.5 * (2 * 2 + 3) = 3.5 centavos.
+ROUNDING_SLACK_CENTS = 4
+# Largest window scanned centavo by centavo when locating the exact first root of a segment.
+_MAX_SCAN = 4096
 
 
 def _line(amount: Decimal) -> int:
@@ -262,55 +271,84 @@ def calculate_profit(inp: ProfitInputs) -> ProfitResult:
 
 
 def _with_sale(inp: ProfitInputs, sale_cents: int) -> ProfitInputs:
-    return ProfitInputs(**{**inp.__dict__, "sale_price_cents": sale_cents})
+    return replace(inp, sale_price_cents=sale_cents)
+
+
+def _first_root(profit: Callable[[int], int], lo: int, hi: int) -> int | None:
+    """Smallest ``s`` in ``[lo, hi]`` with ``profit(s) >= 0`` on a segment where profit is a linear trend
+    ``u(s)`` plus rounding noise of at most ``E = ROUNDING_SLACK_CENTS`` (so not exactly monotonic).
+
+    With ``p(lo) < 0`` and the trend's slope ``m`` bounded from the two end points (the noise of each is at
+    most E), a root can only exist where ``u(s) >= -E`` and certainly exists where ``u(s) >= E``.  That
+    window is a few centavos wide for any real fee profile, and it is scanned exhaustively, so the answer
+    is the true minimum - no step caps and no work proportional to the price."""
+    if hi - lo <= _MAX_SCAN:
+        return next((s for s in range(lo, hi + 1) if profit(s) >= 0), None)
+    p_lo = profit(lo)
+    if p_lo >= 0:
+        return lo
+    p_hi = profit(hi)
+    slack = 2 * ROUNDING_SLACK_CENTS
+    if max(p_lo, p_hi) < -slack:
+        return None  # the linear trend is below -E at both ends, hence everywhere on the segment
+    span = hi - lo
+    m_low = Fraction(p_hi - p_lo - slack, span)
+    m_high = Fraction(p_hi - p_lo + slack, span)
+    if m_low > 0:
+        # u(s) >= -E needs s - lo >= (-E - u(lo)) / m >= (-2E - p_lo) / m_high
+        first = lo + max(0, math.ceil(Fraction(-slack - p_lo) / m_high))
+        # u(s) >= E (so p(s) >= 0) holds once s - lo >= (2E - p_lo) / m_low
+        last = min(hi, lo + math.ceil(Fraction(slack - p_lo) / m_low))
+    else:
+        first, last = lo, hi  # flat or falling trend (selling costs ~ 100 % of the price): no useful bound
+    if first > hi:
+        return None
+    if last - first <= _MAX_SCAN:
+        return next((s for s in range(first, last + 1) if profit(s) >= 0), None)
+    # Only reachable for pathological profiles whose net slope is ~0: locate a sign change by bisection and
+    # take the earliest root within _MAX_SCAN centavos below it.
+    if profit(last) < 0:
+        return next((s for s in range(first, first + _MAX_SCAN + 1) if profit(s) >= 0), None)
+    low, high = first, last  # profit(low) < 0 unless low is the root; profit(high) >= 0
+    if profit(low) >= 0:
+        return low
+    while high - low > 1:
+        mid = (low + high) // 2
+        if profit(mid) >= 0:
+            high = mid
+        else:
+            low = mid
+    start = max(first, high - _MAX_SCAN)
+    return next(s for s in range(start, high + 1) if profit(s) >= 0)
 
 
 def break_even_sale_price(inp: ProfitInputs, *, upper_bound_cents: int = 10_000_000_000) -> int | None:
     """Smallest sale price (centavos) whose net profit is >= 0, or None if none below ``upper_bound``.
 
-    Net proceeds are piecewise-linear in the sale price (fee tiers and the free-shipping threshold create
-    breakpoints), so we solve each segment analytically and verify the candidate with the real calculator.
+    Fee tiers, the free-shipping threshold and the fixed payment fee (charged only when the sale price is
+    above 0) split the price axis into segments; inside each one profit is linear up to per-line rounding.
+    Segments are searched in ascending order with :func:`_first_root`, and every candidate is the real
+    calculator's answer, so the result is exact.
     """
     fee = inp.fee
+
+    def profit(sale_cents: int) -> int:
+        return calculate_profit(_with_sale(inp, sale_cents)).net_profit_cents
+
     breakpoints = sorted(
-        {0}
-        | {t.max_price_cents + 1 for t in fee.fixed_fee_tiers if t.max_price_cents is not None}
-        | ({fee.free_shipping_threshold_cents} if fee.free_shipping_threshold_cents is not None else set())
+        b for b in (
+            {0, 1}
+            | {t.max_price_cents + 1 for t in fee.fixed_fee_tiers if t.max_price_cents is not None}
+            | ({fee.free_shipping_threshold_cents} if fee.free_shipping_threshold_cents is not None else set())
+        )
+        if 0 <= b <= upper_bound_cents
     )
-    segments = [(lo, (breakpoints[i + 1] - 1) if i + 1 < len(breakpoints) else upper_bound_cents)
-                for i, lo in enumerate(breakpoints)]
-    best: int | None = None
-    for lo, hi in segments:
-        if lo > upper_bound_cents:
-            break
-        # Evaluate profit at two points to get the slope/intercept of this linear segment.
-        p_lo = calculate_profit(_with_sale(inp, lo)).net_profit_cents
-        if p_lo >= 0:
-            candidate = lo
-        else:
-            probe = min(hi, lo + 1_000_000)
-            if probe == lo:
-                continue
-            p_probe = calculate_profit(_with_sale(inp, probe)).net_profit_cents
-            slope = Decimal(p_probe - p_lo) / Decimal(probe - lo)
-            if slope <= 0:
-                continue
-            candidate = lo + int((Decimal(-p_lo) / slope).to_integral_value(rounding=ROUND_CEILING))
-            if candidate > hi:
-                continue
-            # Line-item rounding can shift the root by a few centavos; walk to the exact boundary.
-            while candidate > lo and calculate_profit(_with_sale(inp, candidate - 1)).net_profit_cents >= 0:
-                candidate -= 1
-            steps = 0
-            while calculate_profit(_with_sale(inp, candidate)).net_profit_cents < 0 and steps < 1000:
-                candidate += 1
-                steps += 1
-            if candidate > hi or calculate_profit(_with_sale(inp, candidate)).net_profit_cents < 0:
-                continue
-        if best is None or candidate < best:
-            best = candidate
-        break  # segments are ascending: the first segment with a root has the smallest root
-    return best
+    for i, lo in enumerate(breakpoints):
+        hi = breakpoints[i + 1] - 1 if i + 1 < len(breakpoints) else upper_bound_cents
+        root = _first_root(profit, lo, hi)
+        if root is not None:
+            return root  # segments are ascending: the first segment with a root has the smallest root
+    return None
 
 
 def max_buy_price_for_roi(inp: ProfitInputs, target_roi_bp: int) -> int | None:

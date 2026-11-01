@@ -114,7 +114,12 @@ def evaluate(
     *,
     dispatch: bool = True,
 ) -> list[Notification]:
-    """Create notifications for matching (rule, opportunity) pairs.  Flushes; never raises."""
+    """Create notifications for matching (rule, opportunity) pairs.  Flushes; never raises.
+
+    With ``dispatch=True`` the new notifications are COMMITTED before they are pushed, so the slow push
+    channels never run while this session holds the SQLite write lock.  Callers that must commit
+    themselves pass ``dispatch=False``, commit, then call :func:`deliver` (as ``analysis.recompute`` does).
+    """
     settings = settings or get_settings()
     created: list[Notification] = []
     try:
@@ -153,6 +158,7 @@ def evaluate(
                 except Exception:
                     log.exception("alert rule %s failed for opportunity %s", rule.id, opp.id)
         if dispatch and created:
+            session.commit()
             deliver(session, created, settings)
     except Exception:
         log.exception("alert evaluation failed")
@@ -160,8 +166,15 @@ def evaluate(
 
 
 def deliver(session: Session, notifications: Iterable[Notification], settings: Settings | None = None) -> None:
-    """Send notifications to their rule's channels and record the result.  Flushes; never raises."""
+    """Send notifications to their rule's channels and record the result.  Flushes once; never raises.
+
+    Every push (ntfy, Telegram, webhook: HTTP calls of up to ``notify.TIMEOUT_SECONDS`` each) runs before
+    anything is written: reads take no SQLite write lock, so no other writer has to wait for the network.
+    The results are then assigned and flushed together; call it with no write transaction open and commit
+    right after (one short write).
+    """
     settings = settings or get_settings()
+    results: list[tuple[Notification, dict[str, str]]] = []
     for note in notifications:
         try:
             channels = getattr(note, "_flipradar_channels", None)
@@ -173,7 +186,14 @@ def deliver(session: Session, notifications: Iterable[Notification], settings: S
                 opp = session.get(Opportunity, note.opportunity_id)
                 if opp is not None and opp.buy_listing is not None:
                     click_url = opp.buy_listing.url
-            note.delivery_json = notify.dispatch(note, channels, settings, click_url=click_url)
-            session.flush()
+            results.append((note, notify.dispatch(note, channels, settings, click_url=click_url)))
         except Exception:
             log.exception("notification %s delivery failed", note.id)
+    if not results:
+        return
+    try:
+        for note, delivery in results:
+            note.delivery_json = delivery
+        session.flush()
+    except Exception:
+        log.exception("recording the delivery status of %d notification(s) failed", len(results))

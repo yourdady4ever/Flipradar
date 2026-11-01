@@ -1,14 +1,16 @@
-"""First-run / every-start seeding: built-in fee profiles and source rows.
+"""First-run / every-start seeding: added columns, built-in fee profiles and source rows.
 
 Idempotent: existing rows keep their user-editable fields (``enabled``, ``default_fee_profile_key``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from ..collectors import registry
@@ -117,8 +119,44 @@ def ensure_source(session: Session, key: str, *, name: str | None = None, kind: 
     return row
 
 
+#: Columns added to existing tables after the first release: (table, column, one-off backfill SQL or None).
+#: ``create_all()`` only creates missing TABLES, so :func:`ensure_added_columns` adds these (nullable, no
+#: default) to databases created earlier.  Items written off before ``written_off_at`` existed get their
+#: last-modified time, the best date available, so their loss is still booked.
+ADDED_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
+    ("inventory_items", "written_off_at",
+     "UPDATE inventory_items SET written_off_at = updated_at WHERE status = 'written_off'"),
+)
+
+
+def ensure_added_columns(session: Session) -> list[str]:
+    """``ALTER TABLE ... ADD COLUMN`` for every :data:`ADDED_COLUMNS` entry the database lacks.
+
+    Returns the added ``table.column`` names.  Names come from the constant above, never from input.
+    """
+    from ..db import Base
+
+    connection = session.connection()
+    inspector = inspect(connection)
+    added: list[str] = []
+    for table_name, column_name, backfill in ADDED_COLUMNS:
+        if not inspector.has_table(table_name):
+            continue  # create_all() creates it with every column
+        if column_name in {c["name"] for c in inspector.get_columns(table_name)}:
+            continue
+        column = Base.metadata.tables[table_name].c[column_name]
+        ddl_type = column.type.compile(dialect=connection.dialect)
+        connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl_type}"))
+        if backfill:
+            connection.execute(text(backfill))
+        added.append(f"{table_name}.{column_name}")
+        log.info("added column %s.%s to the existing database", table_name, column_name)
+    return added
+
+
 def bootstrap(session: Session, settings: Settings | None = None) -> dict[str, int]:
-    """Seed fee profiles and sources and restore rotated API tokens (flushed; caller commits)."""
+    """Add new columns, seed fee profiles and sources and restore rotated API tokens (flushed; caller commits)."""
+    ensure_added_columns(session)
     counts = {"fee_profiles": seed_fee_profiles(session), "sources": seed_sources(session)}
     if settings is not None:
         install_ml_token_persistence(session, settings)
@@ -138,6 +176,73 @@ def _fingerprint(token: str | None) -> str | None:
     return hashlib.sha256(token.encode()).hexdigest() if token else None
 
 
+# The listener runs synchronously on the event loop (inside the collector's token refresh), so it must never
+# touch the database itself: a sync SQLite write there waits busy_timeout for a lock that a coroutine on the
+# same (now blocked) loop may hold, and then fails.  It only records the token; the write happens in a short,
+# independent transaction off the loop (a worker thread), and run_collection persists it again right after
+# every collector returns, so a write that failed (busy database) is retried.
+_ml_seed: str | None = None  # fingerprint of the configured FLIPRADAR_ML_REFRESH_TOKEN
+_ml_pending: tuple[str | None, str] | None = None  # (seed fingerprint, newest rotated token) not yet stored
+_ml_pending_lock = threading.Lock()  # guards the variables above; never held during I/O
+_ml_write_lock = threading.Lock()  # serialises the database writes (newest token always written last)
+_ml_background: set[asyncio.Future[bool]] = set()
+
+
+def _record_rotated_ml_token(new_token: str) -> None:
+    """Refresh-token listener: remember the token and persist it without blocking the caller's event loop."""
+    global _ml_pending
+    with _ml_pending_lock:
+        _ml_pending = (_ml_seed, new_token)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # no event loop to block (synchronous caller): write right away
+        persist_rotated_ml_token()
+        return
+    future = loop.run_in_executor(None, persist_rotated_ml_token)
+    _ml_background.add(future)
+    future.add_done_callback(_ml_background.discard)
+
+
+def persist_rotated_ml_token() -> bool:
+    """Store the newest rotated Mercado Libre refresh token in its own short transaction.  Never raises.
+
+    Call it from a worker thread when an event loop is running.  Returns True when nothing is left pending;
+    on failure (e.g. the database stayed locked) the token stays pending and the next call retries.
+    """
+    global _ml_pending
+    from ..db import session_scope
+    from ..models import AppSetting
+
+    with _ml_write_lock:
+        with _ml_pending_lock:
+            pending = _ml_pending
+        if pending is None:
+            return True
+        seed, token = pending
+        try:
+            with session_scope() as s:
+                existing = s.get(AppSetting, ML_TOKEN_KEY)
+                value = {"seed": seed, "token": token}
+                if existing is None:
+                    s.add(AppSetting(key=ML_TOKEN_KEY, value_json=value))
+                else:
+                    existing.value_json = value
+        except Exception:
+            log.warning("could not store the rotated Mercado Libre refresh token yet; will retry", exc_info=True)
+            return False
+        with _ml_pending_lock:
+            if _ml_pending == pending:
+                _ml_pending = None
+            return _ml_pending is None
+
+
+def _reset_ml_token_state() -> None:
+    """Forget the seed and any pending token (tests)."""
+    global _ml_seed, _ml_pending
+    with _ml_pending_lock:
+        _ml_seed, _ml_pending = None, None
+
+
 def install_ml_token_persistence(session: Session, settings: Settings) -> None:
     """Persist Mercado Libre's single-use refresh tokens across restarts.
 
@@ -145,9 +250,11 @@ def install_ml_token_persistence(session: Session, settings: Settings) -> None:
     in ``FLIPRADAR_ML_REFRESH_TOKEN`` stops working after the first refresh.  The rotated token is stored
     in ``app_settings`` (never returned by any API) together with a fingerprint of the configured seed
     token: if the operator later configures a *different* token (re-authorisation), the new one wins.
+    Installing again (e.g. a second app instance in the same process) replaces the seed; the listener is
+    registered once.
     """
+    global _ml_seed
     from ..collectors import mercadolibre
-    from ..db import session_scope
     from ..models import AppSetting
 
     seed = _fingerprint(settings.ml_refresh_token)
@@ -157,14 +264,9 @@ def install_ml_token_persistence(session: Session, settings: Settings) -> None:
         if stored:
             settings.ml_refresh_token = stored
 
-    def _persist(new_token: str) -> None:
-        with session_scope() as s:
-            existing = s.get(AppSetting, ML_TOKEN_KEY)
-            value = {"seed": seed, "token": new_token}
-            if existing is None:
-                s.add(AppSetting(key=ML_TOKEN_KEY, value_json=value))
-            else:
-                existing.value_json = value
-
+    with _ml_pending_lock:
+        _ml_seed = seed
     if seed:
-        mercadolibre.add_refresh_token_listener(_persist)
+        mercadolibre.add_refresh_token_listener(_record_rotated_ml_token)
+    else:
+        mercadolibre.remove_refresh_token_listener(_record_rotated_ml_token)

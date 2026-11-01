@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Iterable
-from decimal import ROUND_FLOOR, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..engine.types import NormalizedAttributes, RawListing
@@ -203,19 +203,36 @@ def _prev_tokens(text: str, pos: int, n: int = 2) -> list[str]:
     return text[:pos].split()[-n:]
 
 
+#: Words allowed between a negation and the cue it negates ("no esta danado", "no se ha mojado").
+_NEGATION_GLUE = _COPULAS | {"se", "lo", "le", "han"}
+#: Damage adjectives that, right after a packaging word, describe the box ("caja un poco dañada").
+_PACKAGING_DAMAGE = re.compile(r"danad|mojad")
+
+
+def _negated(text: str, pos: int) -> bool:
+    for tok in reversed(_prev_tokens(text, pos, 3)):
+        if tok in _NEGATIONS:
+            return True
+        if tok not in _NEGATION_GLUE:
+            return False
+    return False
+
+
 def _has_cue(text: str, patterns: list[re.Pattern[str]]) -> bool:
-    """True when any cue occurs and is not negated by one of the two preceding words."""
+    """True when any cue occurs and is not negated by the preceding words."""
     for pattern in patterns:
         for m in pattern.finditer(text):
             first = m.group(0).split()[0]
-            prev = _prev_tokens(text, m.start(), 2)
+            prev = _prev_tokens(text, m.start(), 3)
             if first in ("no", "not"):
                 # "no enciende": negated only by "si no enciende" style conditionals
                 if prev and prev[-1] in ("si", "if", "aunque"):
                     continue
                 return True
-            if prev and (prev[-1] in _NEGATIONS or (len(prev) > 1 and prev[-2] in _NEGATIONS and prev[-1] in _COPULAS)):
+            if _negated(text, m.start()):
                 continue  # "sin danos", "no reportado", "no esta danado" - but not "nunca usado, sellado"
+            if _PACKAGING_DAMAGE.match(first) and any(tok in V.PACKAGING_WORDS for tok in prev):
+                continue  # "nuevo, caja dañada": the box is damaged, not the item
             return True
     return False
 
@@ -241,7 +258,7 @@ def _condition_from_source(condition_raw: Any) -> str | None:
         return None
     if value in V.SOURCE_CONDITION_MAP:
         return V.SOURCE_CONDITION_MAP[value]
-    if any(p.search(value) for p in _FOR_PARTS):
+    if _has_cue(value, _FOR_PARTS):
         return Condition.FOR_PARTS.value
     return _condition_from_text(value)
 
@@ -305,12 +322,38 @@ def _to_gb(number: str, unit: str) -> int | None:
     return {1000: 1024, 2000: 2048}.get(gb_int, gb_int)
 
 
+#: "4gb ram 128gb" / "64gb ram 4gb": the word "ram" sits between two sizes.  Both ``_RAM_RES`` would claim
+#: a different number; RAM is always the smaller one, the other is storage.
+_RAM_BETWEEN_RE = re.compile(
+    r"(?<![\w.])(\d{1,4})gb\s(?:de\s)?(?:memoria\s)?ram\s(?:de\s)?(\d+(?:\.\d+)?)(gb|tb)(?!\w)"
+)
+#: Laptop RAM sizes that are never a storage capacity (M3/M4 Pro/Max: 36/48/96 GB).
+_RAM_ONLY_VALUES = RAM_VALUES - _STORAGE_VALUES
+
+
 def _ram_and_storage(text: str, category: str | None) -> tuple[int | None, int | None]:
     ram: int | None = None
     ram_positions: set[int] = set()
+    storage_positions: set[int] = set()  # sizes known to be storage (the other side of "Xgb ram Ygb")
+    claimed: list[tuple[int, int]] = []
     storage_hint: int | None = None
+    for m in _RAM_BETWEEN_RE.finditer(text):
+        left, right = int(m.group(1)), _to_gb(m.group(2), m.group(3))
+        if right is None or left == right:
+            continue
+        (ram_value, ram_pos), storage_pos = (
+            ((left, m.start(1)), m.start(2)) if left < right else ((right, m.start(2)), m.start(1))
+        )
+        if ram_value not in RAM_VALUES:
+            continue
+        ram = ram if ram is not None else ram_value
+        ram_positions.add(ram_pos)
+        storage_positions.add(storage_pos)
+        claimed.append((m.start(), m.end()))
     for pattern in _RAM_RES:
         for m in pattern.finditer(text):
+            if any(start <= m.start() < end for start, end in claimed):
+                continue  # already resolved by the "Xgb ram Ygb" rule above
             value = int(m.group(1))
             if value in RAM_VALUES:
                 ram = ram if ram is not None else value
@@ -331,6 +374,9 @@ def _ram_and_storage(text: str, category: str | None) -> tuple[int | None, int |
         gb = _to_gb(m.group(1), m.group(2))
         if gb is None:
             continue
+        if m.start() in storage_positions:
+            candidates.append((gb, True))
+            continue
         before = _prev_tokens(text, m.start(), 3)
         after = text[m.end() :].split()[:1]
         if any(tok in _NOT_STORAGE_BEFORE for tok in before[-2:]) or (after and after[0] in _NOT_STORAGE_AFTER):
@@ -344,7 +390,13 @@ def _ram_and_storage(text: str, category: str | None) -> tuple[int | None, int |
     distinct = sorted({gb for gb, _ in candidates})
     if ram is None and category in ("phone", "tablet", "laptop", "handheld_pc") and len(distinct) >= 2:
         small, rest = distinct[0], distinct[1:]
-        if small <= 32 and small in RAM_VALUES and min(rest) >= 64:
+        small_is_storage = any(gb == small and exp for gb, exp in candidates)  # "128gb ssd 1tb hdd"
+        if (
+            (small <= 32 and small in RAM_VALUES and min(rest) >= 64)
+            # laptops: "M3 Max 36gb 1tb", "M4 Pro 48gb 512gb", "M3 Max 64gb 2tb" - Pro/Max RAM sizes above 32
+            or (category == "laptop" and small in _RAM_ONLY_VALUES and min(rest) >= 256)
+            or (category == "laptop" and small in (64, 128) and not small_is_storage and min(rest) >= 1024)
+        ):
             ram = small  # "12gb 512gb" / "16gb 512gb ssd 1tb hdd": the small value is RAM
             candidates = [(gb, exp) for gb, exp in candidates if gb != small]
     minimum = 16 if category in V.STORAGE_CATEGORIES else 8
@@ -408,12 +460,29 @@ def _edition(text: str) -> str | None:
     return None
 
 
-def _inch_token(value: str) -> str:
-    number = Decimal(value)
-    whole = number.to_integral_value(rounding=ROUND_FLOOR)
-    if number - whole >= Decimal("0.85"):
-        whole += 1
-    return f"{int(whole)}in"
+_inch_token = V.inch_token
+
+_WATCH_MATERIAL_RES = (
+    (re.compile(r"(?<!\w)(?:acero(?:\sinoxidable)?|inoxidable|stainless(?:\ssteel)?|steel)(?!\w)"), "steel"),
+    (re.compile(r"(?<!\w)(?:titanio|titanium)(?!\w)"), "titanium"),
+    (re.compile(r"(?<!\w)hermes(?!\w)"), "hermes"),
+    (re.compile(r"(?<!\w)(?:aluminio|aluminum|aluminium)(?!\w)"), "aluminum"),
+)
+#: A material right after one of these describes the band, not the case ("correa de acero", "malla milanesa").
+_BAND_WORDS = frozenset(
+    {"correa", "correas", "malla", "pulso", "pulsos", "pulsera", "extensible", "brazalete", "band", "banda",
+     "loop", "eslabones", "milanesa", "milanese", "strap"}
+)
+
+
+def _watch_materials(text: str) -> list[str]:
+    """Case materials stated in a smartwatch title (steel / titanium / hermes / aluminum)."""
+    found = set()
+    for pattern, material in _WATCH_MATERIAL_RES:
+        for m in pattern.finditer(text):
+            if not any(tok in _BAND_WORDS for tok in _prev_tokens(text, m.start(), 3)):
+                found.add(material)
+    return sorted(found)
 
 
 def _identity_tokens(text: str, category: str | None, model: str | None) -> list[str]:
@@ -435,6 +504,7 @@ def _identity_tokens(text: str, category: str | None, model: str | None) -> list
         tokens.extend(sorted(s for s in sizes if 7 <= int(s[:-2]) <= 18))
     if category == "smartwatch":
         tokens.extend(sorted({m.group(1) + "mm" for m in re.finditer(r"(?<!\w)(3[8-9]|4[0-9]|5[01])mm(?!\w)", text)}))
+        tokens.extend(_watch_materials(text))
     if category == "gpu":
         vram = sorted(
             {int(m.group(1)) for m in re.finditer(r"(?<![\w.])(\d{1,2})gb(?!\w)", text) if int(m.group(1)) <= 48}
@@ -498,12 +568,19 @@ def _matches(text: str, patterns: list[tuple[re.Pattern[str], str]]) -> list[tup
     return sorted(found)
 
 
-def _is_inclusion(text: str, pos: int, *, digits: bool) -> bool:
+def _is_inclusion(text: str, pos: int, *, digits: bool, model_end: int | None = None) -> bool:
+    """True when the accessory word at ``pos`` is introduced as an included item ("con funda",
+    "+ cargador", "2 controles").  A number that is the last word of the model name ("iPhone 15 funda",
+    "Switch 2 funda" - ``model_end`` is where the model name ends) is not a quantity."""
     prev = _prev_tokens(text, pos, 2)
     if not prev:
         return False
-    if prev[-1] in V.INCLUSION_WORDS or (digits and prev[-1].isdigit()):
+    if prev[-1] in V.INCLUSION_WORDS:
         return True
+    if digits and prev[-1].isdigit():
+        digit_start = text.rfind(prev[-1], 0, pos)
+        if model_end is None or digit_start >= model_end:
+            return True
     if prev[-1] == "de" and len(prev) > 1 and prev[-2] in V.DEVICE_NOUNS:
         return True  # "consola de juegos"
     return digits and any(p in V.INCLUSION_WORDS for p in prev)
@@ -513,13 +590,56 @@ def _has_device_noun(text: str) -> bool:
     return any(tok in V.DEVICE_NOUNS for tok in text.split())
 
 
+#: Words right after an accessory word that make it an included item ("juegos incluidos", "funda de regalo").
+_INCLUDED_AFTER = frozenset({"incluido", "incluida", "incluidos", "incluidas", "gratis", "regalo"})
+#: Words right after a weak accessory word that describe the device's own part ("pantalla impecable",
+#: "bateria al 90", "pantalla sin detalles"): the listing is still the device.
+_PART_DESCRIPTORS = frozenset(
+    {"al", "rota", "roto", "rotas", "estrellada", "estrellado", "quebrada", "quebrado", "impecable", "impecables",
+     "perfecta", "perfecto", "intacta", "intacto", "sin", "con", "danada", "danado", "rayada", "rayones",
+     "detalle", "detalles", "funcionando", "excelente", "buen", "buena", "salud", "condicion", "estado"}
+)
+#: "<word> de bateria" style health mentions.
+_PART_HEALTH_BEFORE = frozenset({"salud", "condicion", "vida", "estado", "ciclos", "smart"})
+
+
+def _included_after(text: str, end: int) -> bool:
+    return any(tok in _INCLUDED_AFTER for tok in text[end:].split()[:2])
+
+
+def _describes_own_part(text: str, start: int, end: int) -> bool:
+    """Weak accessory word used to describe the device itself ("bateria 85", "lente 18 55mm",
+    "pantalla impecable", "salud de bateria", "Echo Show smart display")."""
+    nxt = text[end:].split()[:1]
+    if nxt and (nxt[0] in _PART_DESCRIPTORS or (nxt[0].isdigit() and int(nxt[0]) <= 100)):
+        return True
+    prev = _prev_tokens(text, start, 2)
+    return bool(prev) and (prev[-1] in _PART_HEALTH_BEFORE or (prev[-1] == "de" and len(prev) > 1
+                                                                 and prev[-2] in _PART_HEALTH_BEFORE))
+
+
+def _word_spans(text: str, patterns: list[tuple[re.Pattern[str], str]]) -> list[tuple[int, int, str]]:
+    return sorted((m.start(), m.end(), typ) for pattern, typ in patterns for m in pattern.finditer(text))
+
+
 def detect_accessory(
-    text: str, device_start: int | None, *, has_storage: bool = False, source_category: str | None = None
+    text: str,
+    device_start: int | None,
+    *,
+    has_storage: bool = False,
+    source_category: str | None = None,
+    device_end: int | None = None,
 ) -> tuple[bool, str | None, str | None]:
     """Decide whether normalized ``text`` sells an accessory rather than the device it mentions.
 
-    ``device_start`` is the position of the recognised device/model name (None if none).  Returns
+    ``device_start``/``device_end`` delimit the recognised device/model name (None if none).  Returns
     ``(is_accessory, accessory_type, reason)``.
+
+    After the device name, when the title gives no device details (no storage, no "consola"/"celular"
+    style noun), any accessory word that is not introduced as an included item ("con funda",
+    "+ control", "juegos incluidos") makes the listing an accessory: "AirPods Pro 2 Estuche de carga",
+    "iPhone 15 Funda", "PS5 Slim Control".  Weak words describing the device's own part ("bateria 85",
+    "pantalla impecable", "lente 18-55mm") and the word "caja" (see ``EMPTY_BOX_CUES``) do not count.
     """
     strong = _matches(text, _STRONG)
     weak = _matches(text, _WEAK)
@@ -539,8 +659,16 @@ def detect_accessory(
                 continue
             return True, typ, f"title leads with an accessory word ({typ})"
         if not has_storage and not _has_device_noun(text):
-            for start, typ in strong:
-                if start < device_start or _is_inclusion(text, start, digits=True):
+            model_end = device_end if device_end is not None else device_start
+            weak_spans = _word_spans(text, _WEAK)
+            spans = sorted([(s, e, t, True) for s, e, t in _word_spans(text, _STRONG)]
+                           + [(s, e, t, False) for s, e, t in weak_spans])
+            for start, end, typ, is_strong in spans:
+                if start < model_end or typ == "empty_box":
+                    continue
+                if _is_inclusion(text, start, digits=True, model_end=model_end) or _included_after(text, end):
+                    continue
+                if not is_strong and _describes_own_part(text, start, end):
                     continue
                 return True, typ, f"accessory word ({typ}) after the device name and no device details"
         return False, None, None
@@ -582,15 +710,40 @@ _CONNECTIVITY_PLUS = re.compile(r"(?<!\w)(?:wifi|wi\sfi|gps)\s?\+\s?(?:cellular|
 _INCLUDES_RE = re.compile(r"(?<!\w)(?:incluye|incluido|incluida|incluidos|includes)(?!\w)")
 
 
+#: "x2" / "x 2" quantities (a model name such as "Poco X6" or "Xbox Series X" is excluded by position).
+_TIMES_RE = re.compile(r"(?<!\w)x\s?(?:[2-9]|1\d)(?!\w)")
+#: "con/mas/y <another device>" ("iPhone 15 con Apple Watch", "mas AirPods"); not "compatible con".
+_WITH_RE = re.compile(
+    r"(?<!\w)(?<!compatible\s)(?:con|mas|y|incluye|with|and)\s(?:un\s|una\s|unos\s|unas\s|sus\s|su\s|el\s|la\s|los\s)?"
+)
+_QUANTITY_NOUNS = frozenset({"consolas", "celulares", "telefonos", "unidades", "piezas", "equipos", "pzas"})
+
+
 def is_bundle(text: str) -> bool:
     """True when normalized ``text`` sells several items together ("+ 2 controles", "con juegos",
-    "combo", "lote", "kit", "2x", "paquete", "bundle", "incluye <non-standard item>")."""
+    "combo", "lote", "kit", "2x", "x2", "2 iPhone ...", "(2 piezas)", "par de", "paquete", "bundle",
+    "con control extra", "con PS VR2", "con Apple Watch", "incluye <non-standard item>")."""
     text = _CONNECTIVITY_PLUS.sub(" ", text)  # "wifi + cellular" is a variant, not a bundle
     if any(p.search(text) for p in _BUNDLE_RES):
         return True
     for m in _INCLUDES_RE.finditer(text):
         following = [t for t in text[m.end() :].split() if not t.isdigit() and t not in ("un", "una", "el", "la")]
         if following and following[0] not in V.STANDARD_INCLUSIONS:
+            return True
+    hits = V.find_model_hits(text)
+    tokens = text.split()
+    if len(tokens) > 1 and tokens[0] in V.LEADING_QUANTITIES:  # "2 PS5 Slim ...", "Dos iPhone 13"
+        pos = len(tokens[0]) + 1
+        if tokens[1] in _QUANTITY_NOUNS:
+            pos += len(tokens[1]) + 1
+        if any(h.start == pos for h in hits) or V.BRAND_RE.match(text, pos):
+            return True
+    for m in _TIMES_RE.finditer(text):
+        if not any(h.start <= m.start() < h.end for h in hits):
+            return True
+    for m in _WITH_RE.finditer(text):
+        # another device family named as an extra item; the standard controller of a console is not extra
+        if any(h.start == m.end() and h.accessory_type != "controller" for h in hits):
             return True
     return False
 
@@ -624,6 +777,60 @@ def _is_filler(token: str) -> bool:
     return token in V.PREFIX_FILLERS or V.BRAND_RE.fullmatch(token) is not None or token in V.VARIANT_WORDS
 
 
+def _is_color_word(token: str) -> bool:
+    return token in _COLOR_WORDS or extract_color(token) is not None
+
+
+_COLOR_WORDS = frozenset({"espacial", "estelar", "natural", "neon"})
+_SIZE_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?(?:gb|tb|in|mm|hz|mah|w)?")
+
+
+def _known_token(token: str) -> bool:
+    """A word that describes a device listing (condition, color, edition, standard part...) rather
+    than naming something else (a game, a special edition, another product)."""
+    return (
+        _is_filler(token)
+        or token in V.SUFFIX_FILLERS
+        or _SIZE_TOKEN_RE.fullmatch(token) is not None
+        or _is_color_word(token)
+        or any(p.fullmatch(token) for p, _typ in _STRONG)
+        or any(p.fullmatch(token) for p, _typ in _WEAK)
+    )
+
+
+def _model_end(text: str, hit: V.ModelHit | None) -> int | None:
+    """Where the model name ends: the rule's match plus the following words the built model consumed
+    ("airpods pro" + "2" for AirPods Pro 2, "apple watch" + "series 9")."""
+    if hit is None:
+        return None
+    end = hit.end
+    words = set((hit.model or "").split())
+    for m in re.finditer(r"\S+", text[hit.end :]):
+        if m.group(0) not in words:
+            break
+        end = hit.end + m.end()
+    return end
+
+
+def _words_until_inclusion(text: str, pos: int) -> list[str]:
+    words: list[str] = []
+    for tok in text[pos:].split():
+        if tok in V.INCLUSION_WORDS or tok in ("incluye", "para"):
+            break
+        words.append(tok)
+    return words
+
+
+def _named_extra_item(text: str, model_end: int) -> bool:
+    """A console listing that names an extra item after "con"/"y"/"+" ("con Spiderman 2", "y FC 25"):
+    the extra (usually a game) is not part of the standard console."""
+    for m in re.finditer(r"(?<!\w)(?:con|y|mas|\+|e|incluye)(?!\w)", text[model_end:]):
+        following = _words_until_inclusion(text, model_end + m.end())
+        if any(not _known_token(tok) for tok in following):
+            return True
+    return False
+
+
 def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str, Any]:
     """Core title analysis on normalized text (no source fields)."""
     notes: list[str] = []
@@ -650,11 +857,34 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
         brand = found[0] if found else None
         category, model = _detect_category(text, brand), None
     ram, storage = _ram_and_storage(text, category)
+    model_end = _model_end(text, primary)
     accessory, acc_type, acc_reason = detect_accessory(
-        text, primary.start if primary else None, has_storage=storage is not None, source_category=source_category
+        text,
+        primary.start if primary else None,
+        has_storage=storage is not None,
+        source_category=source_category,
+        device_end=model_end,
     )
     if primary is not None and primary.accessory_type and not accessory:
         accessory, acc_type, acc_reason = True, primary.accessory_type, f"{primary.model or primary.rule} is an accessory"
+    if (
+        not accessory
+        and primary is not None
+        and model_end is not None
+        and not bundle
+        and storage is None
+        and not _has_device_noun(text)
+    ):
+        # "PS5 Dualsense Blanco": an accessory product named after the device it belongs to.
+        for hit in hits:
+            if (
+                hit.accessory_type
+                and hit.start >= model_end
+                and not _is_inclusion(text, hit.start, digits=True, model_end=model_end)
+            ):
+                accessory, acc_type = True, hit.accessory_type
+                acc_reason = f"{hit.model or hit.rule} ({hit.accessory_type}) named after the device: accessory listing"
+                break
     if not accessory and _is_software(text, category, primary.start if primary else None):
         accessory, acc_type, acc_reason = True, "software", "title describes a game/software, not the console"
     if acc_reason:
@@ -668,17 +898,27 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
             ambiguous = True
         prefix = text[: primary.start].split()
         unknown = [] if primary.rule in V.EXACT_CODE_RULES else [tok for tok in prefix if not _is_filler(tok)]
+        no_device_details = category == "console" and storage is None and not _has_device_noun(text)
+        suffix_unknown = (
+            [tok for tok in _words_until_inclusion(text, model_end) if not _known_token(tok)]
+            if no_device_details and model_end is not None
+            else []
+        )
         if model is not None and len(unknown) >= 3:
             notes.append(f"unrecognised words before the model name ({' '.join(unknown)}): ambiguous")
             model = None
             ambiguous = True
-        elif model is not None and category == "console" and unknown and storage is None and not _has_device_noun(text):
+        elif model is not None and no_device_details and (unknown or suffix_unknown):
+            where = "named after" if unknown else "name followed by"
             notes.append(
-                f"console named after other words ({' '.join(unknown)}) without 'consola' or storage: "
-                "possibly a game or accessory"
+                f"console {where} other words ({' '.join(unknown or suffix_unknown)}) without 'consola' or "
+                "storage: possibly a game or accessory"
             )
             model = None
             ambiguous = True
+    if not bundle and category == "console" and model_end is not None and _named_extra_item(text, model_end):
+        bundle = True
+        notes.append("an extra item (e.g. a game) is named after 'con'/'y'/'+': bundle")
     if model is not None:
         refined, note = V.refine_model(model, storage)
         if note:
@@ -687,6 +927,9 @@ def _analyze_text(text: str, *, source_category: str | None = None) -> dict[str,
     tokens = extract_variant_tokens(text, category, model)
     if primary is not None:
         tokens = sorted(set(tokens) | set(primary.tokens))
+    if model == "ps5 pro" and "disc" in tokens and not bundle:
+        bundle = True  # the PS5 Pro is digital-only: a disc drive is a separately sold add-on
+        notes.append("PS5 Pro listed with the separately sold disc drive: bundle")
     if accessory and acc_type:
         tokens = sorted(set(tokens) | {f"acc:{acc_type}"})
     return {
@@ -723,25 +966,32 @@ def _attr(attributes: dict[str, Any], keys: tuple[str, ...]) -> Any:
 def analyze_listing(raw: RawListing) -> tuple[NormalizedAttributes, list[str]]:
     """Like :func:`normalize_listing` but also returns human-readable notes explaining every
     inference and every reason the listing could not be clustered (canonical_key=None)."""
-    from ..matching.matcher import canonical_key  # local import: matching depends on this package
+    from ..matching.matcher import canonical_key, missing_identity  # local import: matching depends on this
 
     title = raw.title or ""
     text = normalize_text(title)
     a = _analyze_text(text, source_category=raw.category_name)
     notes: list[str] = list(a["notes"])
 
+    source_brand = normalize_text(raw.brand) if raw.brand else ""
+    generic_source_brand = source_brand in V.GENERIC_BRANDS
     brand = a["brand"]
     if brand is None and raw.brand:
-        brand = V.canonical_brand(normalize_text(raw.brand))
+        brand = V.canonical_brand(source_brand)
         if brand:
             notes.append("brand taken from the source's brand field")
     model, category = a["model"], a["category"]
     if model is None and raw.model and not a["is_accessory"] and not a["ambiguous"]:
         source_hits = [h for h in V.find_model_hits(normalize_text(raw.model)) if h.model and not h.accessory_type]
-        if source_hits and (brand is None or brand == source_hits[0].brand):
-            hit = source_hits[0]
+        hit = source_hits[0] if source_hits else None
+        if hit is not None and not generic_source_brand and brand == hit.brand and _title_names_device(text, hit.category):
             brand, model, category = hit.brand, hit.model, hit.category
             notes.append("model taken from the source's model field")
+        elif hit is not None:
+            # The model field of accessory/clone listings names the device they fit or imitate.
+            notes.append(
+                f"source model field ({hit.model}) ignored: the title does not name a {hit.category} of that brand"
+            )
     if category is None:
         category = _detect_category(text, brand)
 
@@ -797,7 +1047,32 @@ def analyze_listing(raw: RawListing) -> tuple[NormalizedAttributes, list[str]]:
             notes.append("exact model not identified: not clustered")
         elif attrs.is_accessory:
             notes.append("accessory whose own product cannot be identified: not clustered")
+        else:
+            notes.extend(f"{reason}: not clustered" for reason in missing_identity(attrs))
     return attrs, notes
+
+
+#: Device nouns -> category, for checking that a title names the kind of device a source model claims.
+_DEVICE_NOUN_CATEGORY: dict[str, str] = {
+    "celular": "phone", "smartphone": "phone", "telefono": "phone", "consola": "console", "console": "console",
+    "videoconsola": "console", "laptop": "laptop", "notebook": "laptop", "computadora": "laptop",
+    "tablet": "tablet", "tableta": "tablet", "smartwatch": "smartwatch", "reloj": "smartwatch",
+    "dron": "drone", "drone": "drone",
+}
+_COMPATIBLE_CATEGORIES: dict[str, frozenset[str]] = {
+    "console": frozenset({"console", "handheld_pc"}),
+    "handheld_pc": frozenset({"handheld_pc", "console"}),
+}
+
+
+def _title_names_device(text: str, category: str) -> bool:
+    """The title itself says it sells a device of ``category`` ("Celular Apple ...", "Consola ...")."""
+    allowed = _COMPATIBLE_CATEGORIES.get(category, frozenset({category}))
+    named = {_DEVICE_NOUN_CATEGORY[tok] for tok in text.split() if tok in _DEVICE_NOUN_CATEGORY}
+    keyword = _detect_category(text, None)
+    if keyword:
+        named.add(keyword)
+    return bool(named & allowed)
 
 
 def normalize_listing(raw: RawListing) -> NormalizedAttributes:

@@ -39,7 +39,7 @@ POSITIVE_PAIRS = [
     ("Consola Sony PlayStation 5 Slim Digital 1TB", "PS5 Slim Edicion Digital 1 TB"),
     ("Samsung Galaxy S24 Ultra 256GB Negro", "Galaxy S24 Ultra 256 GB Titanium Black Desbloqueado"),
     ("Nintendo Switch OLED 64GB Blanco", "Consola Nintendo Switch Modelo OLED Neon"),
-    ("Xbox Series X 1TB", "Consola Microsoft Xbox Series X 1 TB Negro"),
+    ("Xbox Series X 1TB Lector de Discos", "Consola Microsoft Xbox Series X 1 TB Negro Estandar"),
     ("Apple AirPods Pro 2da Generación USB-C", "AirPods Pro (2nd generation) MagSafe"),
     ("Apple Watch Series 9 45mm GPS Medianoche", "Apple Watch S9 GPS 45 mm Aluminio"),
     ("iPad 10ma Generación 64GB WiFi Plata", "Apple iPad (10a generación) Wi-Fi 64 GB Azul"),
@@ -145,8 +145,8 @@ def test_same_gtin_with_conflicting_attributes_is_rejected() -> None:
 def test_fuzzy_when_information_is_missing_on_one_side() -> None:
     a = norm("iPhone 15 Pro Max Titanio Natural")  # storage unknown
     b = norm("Apple iPhone 15 Pro Max 256GB Titanio Natural")
-    assert a.canonical_key == "apple|iphone 15 pro max|storage:unknown"
-    assert a.canonical_key != b.canonical_key
+    assert a.canonical_key is None  # storage not stated: never a price cluster of its own
+    assert b.canonical_key == "apple|iphone 15 pro max|256gb"
     result = compare(a, b)
     assert result.method == "fuzzy"
     assert 0 < result.confidence < 0.9  # always below the matcher's default threshold
@@ -208,13 +208,13 @@ def attrs(**kw) -> NormalizedAttributes:
 
 def test_canonical_key_rules() -> None:
     assert canonical_key(attrs(storage_gb=128)) == "apple|iphone 15|128gb"
-    assert canonical_key(attrs()) == "apple|iphone 15|storage:unknown"
+    assert canonical_key(attrs()) is None  # storage not stated: capacities would be priced together
     assert canonical_key(attrs(brand=None)) is None
     assert canonical_key(attrs(model=None)) is None
     assert canonical_key(attrs(brand="Apple ", model="iPhone 15", storage_gb=128)) == "apple|iphone 15|128gb"
-    # identity values are sorted and storage-unknown goes last
-    tablet = attrs(model="ipad air m2", category="tablet", variant_tokens=["wifi", "11in", "air"])
-    assert canonical_key(tablet) == "apple|ipad air m2|11in,wifi|storage:unknown"
+    # identity values are sorted
+    tablet = attrs(model="ipad air m2", category="tablet", variant_tokens=["wifi", "11in", "air"], storage_gb=128)
+    assert canonical_key(tablet) == "apple|ipad air m2|128gb|11in,wifi"
     # categories where storage does not change the price ignore it
     assert canonical_key(attrs(model="airpods pro 2", category="audio", storage_gb=None)) == "apple|airpods pro 2"
     # single-configuration models ignore the (often SD-card) storage mention
@@ -310,9 +310,10 @@ def test_matcher_new_cluster_suggestion(matcher: ProductMatcher) -> None:
 def test_matcher_storage_unknown_does_not_merge_by_default(matcher: ProductMatcher) -> None:
     title = "Apple iPhone 15 Pro Max Titanio Natural"
     result = matcher.match(norm(title), title)
-    assert result.product_key == "apple|iphone 15 pro max|storage:unknown"
-    assert result.method == "canonical_key"
+    assert result.product_key is None  # no "storage:unknown" cluster: capacities are different products
+    assert result.method == "none"
     assert any("not merged" in r for r in result.reasons)
+    assert any("storage not stated" in r for r in result.reasons)
 
 
 def test_matcher_fuzzy_with_lower_threshold_picks_best_candidate() -> None:
@@ -339,7 +340,11 @@ def test_matcher_fuzzy_never_crosses_hard_conflicts() -> None:
     )
     title = "PS5 Slim Edicion Digital"
     result = m.match(norm(title), title)
-    assert result.product_key == "sony|ps5 slim|digital|storage:unknown"
+    assert result.product_key is None  # storage not stated: no cluster, and never the disc cluster
+    assert result.method == "none"
+    title = "PS5 Slim Edicion Digital 1TB"
+    result = m.match(norm(title), title)
+    assert result.product_key == "sony|ps5 slim|1024gb|digital"
     assert result.method == "canonical_key"
 
 
@@ -350,7 +355,7 @@ def test_matcher_fuzzy_only_same_brand_and_model() -> None:
     )
     title = "Apple iPhone 15 Pro Max Titanio"
     result = m.match(norm(title), title)
-    assert result.product_key == "apple|iphone 15 pro max|storage:unknown"  # never the 15 Pro cluster
+    assert result.product_key is None  # never the 15 Pro cluster (and no storage-unknown cluster)
 
 
 def test_matcher_unclusterable_listing(matcher: ProductMatcher) -> None:

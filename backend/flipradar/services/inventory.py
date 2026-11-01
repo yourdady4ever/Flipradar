@@ -1,16 +1,32 @@
 """Inventory (things you bought) and sales (things you sold), with deterministic profit accounting.
 
-Cost basis uses the item's *average* unit cost: ``(unit_cost * quantity + extra_costs) / quantity``
-(Decimal, rounded half-up per sale).  Selling fees can be computed with the fee calculator (per unit,
-then multiplied by the units sold) or supplied as overrides with the amounts actually charged.
+Cost basis uses the item's *average* unit cost, ``total_cost / quantity`` with
+``total_cost = unit_cost * quantity + extra_costs``, allocated **cumulatively**: after ``n`` units are sold
+the sales together carry ``round_half_up(total_cost * n / quantity)``, so each sale's basis is that target
+minus what earlier sales already carry and the sale that empties the item takes the remainder.  Invariant:
+``sum(sale.cost_basis_cents) + remaining_cost_cents(item) == total_cost_cents(item)``, always.
+
+* Once an item has sales its unit cost and extra costs are locked (409): the sold units were costed with
+  them.  Delete the sales to change the cost, or record a late cost (e.g. an import-duty invoice) on the
+  next sale as ``other_costs_cents``.
+* Writing an item off (status ``written_off``) books its remaining cost as a realized loss dated
+  ``written_off_at`` (see services/analytics.py).  ``returned`` means the purchase went back to the seller
+  for a refund: the cost leaves inventory without a loss.
+* Selling fees can be computed with the fee calculator (per unit, then multiplied by the units sold) or
+  supplied as overrides with the amounts actually charged.  Shipping: Mercado Libre profiles model the
+  per-unit shipping charged to the seller as their fixed-fee tier; a sale's ``shipping_cents`` > 0 (what
+  you actually paid) REPLACES that tier instead of being added to it.  Leave it 0 to use the estimate.
+* Stock is reserved with a conditional UPDATE, so two simultaneous sales can never oversell (409).
 """
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from ..finance.calculator import FeeModel, ProfitInputs, calculate_profit
@@ -27,6 +43,10 @@ TAX_LINES = ("isr_withheld", "iva_withheld")
 UNSELLABLE = frozenset({InventoryStatus.RETURNED.value, InventoryStatus.WRITTEN_OFF.value})
 OPEN_STATUSES = frozenset({InventoryStatus.PURCHASED.value, InventoryStatus.IN_TRANSIT.value,
                            InventoryStatus.IN_STOCK.value, InventoryStatus.LISTED.value})
+#: Fee-profile channels whose fixed-fee tiers are the per-unit shipping charged to the seller (Mercado Libre's
+#: "costo de los envios", see services/fees.py).  A sale's actual shipping replaces that tier.
+SHIPPING_TIER_CHANNELS = frozenset({"mercadolibre"})
+COST_FIELDS = ("unit_cost_cents", "extra_costs_cents")
 
 
 def _half_up(value: Decimal) -> int:
@@ -43,7 +63,31 @@ def average_unit_cost(item: InventoryItem) -> Decimal:
 
 
 def cost_basis_for(item: InventoryItem, units: int) -> int:
+    """Average cost of ``units`` units in isolation (display only; sales use :func:`cumulative_cost_cents`)."""
     return _half_up(average_unit_cost(item) * units)
+
+
+def cumulative_cost_cents(item: InventoryItem, units_sold: int) -> int:
+    """Cost carried by the first ``units_sold`` units: ``total_cost * units_sold / quantity``, half-up."""
+    quantity = max(1, int(item.quantity))
+    if units_sold >= quantity:
+        return total_cost_cents(item)
+    return _half_up(Decimal(total_cost_cents(item)) * max(0, units_sold) / Decimal(quantity))
+
+
+def allocated_cost_cents(item: InventoryItem) -> int:
+    """Purchase cost already expensed by the item's sales."""
+    return sum(int(s.cost_basis_cents) for s in item.sales)
+
+
+def remaining_cost_cents(item: InventoryItem) -> int:
+    """Cost of the units not sold: total cost minus what the sales carry (reconciles to the centavo)."""
+    return total_cost_cents(item) - allocated_cost_cents(item)
+
+
+def written_off_cost_cents(item: InventoryItem) -> int:
+    """Realized loss of a written-off item (its remaining cost); 0 for any other status."""
+    return remaining_cost_cents(item) if item.status == InventoryStatus.WRITTEN_OFF.value else 0
 
 
 def get_item(session: Session, item_id: int) -> InventoryItem:
@@ -122,12 +166,23 @@ def create_from_opportunity(session: Session, opportunity_id: int, data: Opportu
 
 def update_item(session: Session, item: InventoryItem, data: InventoryUpdate) -> InventoryItem:
     changes = data.model_dump(exclude_unset=True)
-    for name in ("title", "unit_cost_cents", "extra_costs_cents"):
+    for name in ("title", "condition", *COST_FIELDS):
         if name in changes and changes[name] is None:
             raise Invalid(f"{name} cannot be null")
-    if "status" in changes and changes["status"] is not None:
-        if item.quantity_available == 0 and changes["status"] in OPEN_STATUSES:
+    if any(name in changes and changes[name] != getattr(item, name) for name in COST_FIELDS) and item.sales:
+        raise Conflict(
+            "this item already has sales, so its cost is locked (the sold units were costed with it); delete "
+            "its sales to change it, or record the extra cost on the next sale as other_costs_cents"
+        )
+    new_status = changes.get("status")
+    if new_status is not None:
+        if item.quantity_available == 0 and new_status in OPEN_STATUSES:
             raise Conflict("all units are sold; delete a sale first to put units back in stock")
+        if new_status != item.status:
+            if new_status == InventoryStatus.WRITTEN_OFF.value:
+                item.written_off_at = utcnow()
+            elif item.status == InventoryStatus.WRITTEN_OFF.value:
+                item.written_off_at = None
     for name, value in changes.items():
         if name == "status" and value is None:
             continue
@@ -141,6 +196,27 @@ def delete_item(session: Session, item: InventoryItem) -> None:
     session.flush()
 
 
+def _reserve_units(session: Session, item: InventoryItem, units: int) -> None:
+    """Take ``units`` out of stock atomically, or raise Conflict.
+
+    A conditional UPDATE (checked through its rowcount) instead of read-check-write: two simultaneous sales
+    of the last unit cannot both pass, because the second UPDATE sees the first one's result.  On SQLite the
+    UPDATE also takes the write lock, so the item is stable until the caller commits.
+    """
+    result = session.execute(
+        update(InventoryItem)
+        .where(InventoryItem.id == item.id, InventoryItem.quantity_available >= units,
+               InventoryItem.status.not_in(sorted(UNSELLABLE)))
+        .values(quantity_available=InventoryItem.quantity_available - units)
+        .execution_options(synchronize_session=False)
+    )
+    session.refresh(item)
+    if result.rowcount != 1:
+        if item.status in UNSELLABLE:
+            raise Conflict(f"item is {item.status}; it cannot be sold")
+        raise Conflict(f"only {item.quantity_available} unit(s) available")
+
+
 def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
     units = int(data.quantity)
     if item.status in UNSELLABLE:
@@ -151,17 +227,27 @@ def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
                                  "average_unit_cost": str(average_unit_cost(item))}
     fees = taxes = 0
     fee_model: FeeModel | None = None
+    shipping_replaces_tier = False
     if data.fee_profile_key:
         profile = get_profile(session, data.fee_profile_key)
         if profile is None:
             raise Invalid(f"unknown fee profile '{data.fee_profile_key}'")
         fee_model = FeeModel.from_profile(profile)
+        shipping_replaces_tier = (data.shipping_cents > 0 and profile.channel in SHIPPING_TIER_CHANNELS
+                                  and bool(fee_model.fixed_fee_tiers))
     if fee_model is not None and (data.fees_cents is None or data.taxes_withheld_cents is None):
+        calc_model = fee_model
+        if shipping_replaces_tier:
+            # The tier is this channel's estimate of the shipping charged to the seller; the shipping
+            # actually paid (shipping_cents) replaces it so the same charge is not subtracted twice.
+            calc_model = dataclasses.replace(fee_model, fixed_fee_tiers=())
+            breakdown["shipping_source"] = "actual (replaces the profile's per-unit shipping tier)"
+            breakdown["replaced_shipping_estimate_cents"] = fee_model.fixed_fee_for(data.unit_price_cents) * units
         per_unit = calculate_profit(
             ProfitInputs(
                 buy_price_cents=_half_up(average_unit_cost(item)),
                 sale_price_cents=data.unit_price_cents,
-                fee=fee_model,
+                fee=calc_model,
                 # Actual shipping is recorded separately (shipping_cents is the real total paid).
                 seller_shipping_override_cents=0,
             )
@@ -181,14 +267,22 @@ def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
     else:
         breakdown["taxes_source"] = "calculator" if fee_model is not None else "none"
 
+    _reserve_units(session, item, units)  # fresh item state from here on (write lock held on SQLite)
+    units_sold_before, allocated_before = (int(v) for v in session.execute(
+        select(func.coalesce(func.sum(Sale.quantity), 0), func.coalesce(func.sum(Sale.cost_basis_cents), 0))
+        .where(Sale.inventory_item_id == item.id)
+    ).one())
+    cumulative = cumulative_cost_cents(item, units_sold_before + units)
+    cost_basis = cumulative - allocated_before
     revenue = data.unit_price_cents * units
-    cost_basis = cost_basis_for(item, units)
     net = revenue - fees - data.shipping_cents - taxes - data.other_costs_cents
     profit = net - cost_basis
     breakdown.update(
         revenue_cents=revenue, fees_cents=fees, shipping_cents=data.shipping_cents, taxes_withheld_cents=taxes,
         other_costs_cents=data.other_costs_cents, cost_basis_cents=cost_basis, net_proceeds_cents=net,
         profit_cents=profit,
+        cost_allocation={"units_sold_after": units_sold_before + units, "cumulative_cost_cents": cumulative,
+                         "allocated_by_earlier_sales_cents": allocated_before},
     )
     sale = Sale(
         inventory_item_id=item.id,
@@ -208,10 +302,10 @@ def record_sale(session: Session, item: InventoryItem, data: SaleIn) -> Sale:
         notes=data.notes,
     )
     session.add(sale)
-    item.quantity_available -= units
     if item.quantity_available == 0:
         item.status = InventoryStatus.SOLD.value
     session.flush()
+    session.expire(item, ["sales"])
     return sale
 
 
@@ -224,10 +318,19 @@ def get_sale(session: Session, sale_id: int) -> Sale:
 
 def delete_sale(session: Session, sale: Sale) -> InventoryItem:
     item = sale.item
-    item.quantity_available = min(int(item.quantity), int(item.quantity_available) + int(sale.quantity))
+    restored = InventoryItem.quantity_available + int(sale.quantity)
+    session.delete(sale)
+    session.flush()
+    # Relative, clamped update in SQL (never a stale absolute value written back).
+    session.execute(
+        update(InventoryItem)
+        .where(InventoryItem.id == item.id)
+        .values(quantity_available=case((restored > InventoryItem.quantity, InventoryItem.quantity), else_=restored))
+        .execution_options(synchronize_session=False)
+    )
+    session.refresh(item)
     if item.status == InventoryStatus.SOLD.value and item.quantity_available > 0:
         item.status = InventoryStatus.IN_STOCK.value
-    session.delete(sale)
     session.flush()
     session.expire(item, ["sales"])
     return item
@@ -269,7 +372,8 @@ def inventory_out(item: InventoryItem, now: datetime | None = None) -> Inventory
         location=item.location,
         notes=item.notes,
         days_held=days_held(item, now),
-        realized_profit_cents=sum(int(s.profit_cents) for s in sales),
+        # A write-off is a realized loss of the units' remaining cost.
+        realized_profit_cents=sum(int(s.profit_cents) for s in sales) - written_off_cost_cents(item),
         sales=[sale_out(s) for s in sales],
         created_at=as_utc(item.created_at),
         updated_at=as_utc(item.updated_at),

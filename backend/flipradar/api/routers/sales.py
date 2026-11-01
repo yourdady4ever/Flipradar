@@ -32,6 +32,7 @@ def list_sales(
 
 @router.delete("/{sale_id}", response_model=Message)
 def delete_sale(sale_id: int, db: Session = Depends(get_db)) -> Message:
+    """Delete a sale and put its units back in stock (a later sale is costed so the item still reconciles)."""
     sale = service.get_sale(db, sale_id)
     item = service.delete_sale(db, sale)
     db.commit()

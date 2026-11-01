@@ -112,6 +112,16 @@ object ServerUrl {
         return out
     }
 
+    /**
+     * True when [a] and [b] are the same server: both valid and equal once normalised (scheme, host,
+     * port and path).  The saved API token and the notification cursor belong to exactly one server.
+     */
+    fun sameServer(a: String?, b: String?): Boolean {
+        val x = normalize(a) as? Result.Valid ?: return false
+        val y = normalize(b) as? Result.Valid ?: return false
+        return x.url == y.url
+    }
+
     /** True when the URL uses cleartext HTTP to a host that is not on a private network (token exposed). */
     fun isInsecurePublic(url: String?): Boolean {
         val r = normalize(url)

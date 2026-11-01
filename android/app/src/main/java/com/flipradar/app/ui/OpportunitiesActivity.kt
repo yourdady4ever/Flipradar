@@ -33,11 +33,10 @@ class OpportunitiesActivity : BaseActivity() {
     private lateinit var suspicious: CheckBox
     private lateinit var loadMore: Button
     private lateinit var summary: TextView
-    private var total = 0L
-    private var loading = false
-    private var generation = 0
+    /** Holds the applied query: "Load more" continues it even if the filter widgets were edited since. */
+    private val pager = Pager<OpportunityQuery>(PAGE)
 
-    private val statusKeys: List<String?> = listOf(null) + OpportunityOut.STATUSES
+    private val statusKeys: List<String?> = OpportunityOut.STATUS_FILTERS
 
     companion object {
         const val PAGE = 30
@@ -63,15 +62,22 @@ class OpportunitiesActivity : BaseActivity() {
         filters.addView(row1, lp())
         val row2 = hbox()
         sortSpinner = spinner(OpportunityOut.SORTS.map { Labels.sort(this, it) })
-        statusSpinner = spinner(statusKeys.map { if (it == null) getString(R.string.any_status) else Labels.opportunityStatus(this, it) })
+        statusSpinner = spinner(
+            statusKeys.map {
+                when (it) {
+                    null -> getString(R.string.opp_status_open) // no parameter: the server's default open statuses
+                    OpportunityOut.STATUS_ALL -> getString(R.string.any_status)
+                    else -> Labels.opportunityStatus(this, it)
+                }
+            },
+        )
         row2.addView(labeled(getString(R.string.opp_sort), sortSpinner), lp(0, WRAP, 1f))
         row2.addView(labeled(getString(R.string.opp_status), statusSpinner), lp(0, WRAP, 1f).apply { marginStart = dp(8) })
         filters.addView(row2, lp())
         suspicious = checkbox(getString(R.string.opp_include_suspicious))
         filters.addView(suspicious, lp())
         filters.addView(button(getString(R.string.action_apply)) {
-            filters.visibility = View.GONE
-            reload()
+            if (applyFilters()) filters.visibility = View.GONE
         }, lp())
         filters.visibility = View.GONE // collapsed by default so the list gets the screen
 
@@ -87,7 +93,7 @@ class OpportunitiesActivity : BaseActivity() {
             setPadding(dp(8), 0, dp(8), 0)
             clipToPadding = false
         }
-        loadMore = button(getString(R.string.action_load_more)) { loadPage(append = true) }
+        loadMore = button(getString(R.string.action_load_more)) { pager.next()?.let { load(it) } }
         list.addFooterView(loadMore, null, false)
         list.adapter = adapter
         list.setOnItemClickListener { _, _, position, _ ->
@@ -106,7 +112,7 @@ class OpportunitiesActivity : BaseActivity() {
         root.addView(empty, lp())
         root.addView(list, lp(MATCH, 0, 1f))
         setScreen(root)
-        reload()
+        applyFilters()
     }
 
     private fun toggleFilters() {
@@ -122,44 +128,42 @@ class OpportunitiesActivity : BaseActivity() {
         sort = OpportunityOut.SORTS.getOrElse(sortSpinner.selectedItemPosition) { "score" },
     )
 
-    private fun reload() {
+    /** Validates the filter widgets and loads the first page of their query; false when invalid. */
+    private fun applyFilters(): Boolean {
         if (minProfit.text.isNotBlank() && Money.parsePesosToCents(minProfit.text.toString()) == null) {
             minProfit.error = getString(R.string.err_invalid_amount)
-            return
+            return false
         }
-        generation++
-        loading = false
-        adapter.replace(emptyList())
-        loadPage(append = false)
+        load(pager.start(currentQuery()))
+        return true
     }
 
-    private fun loadPage(append: Boolean) {
-        if (loading) return
-        loading = true
-        val gen = generation
-        val query = currentQuery()
-        val offset = if (append) adapter.count else 0
+    /** Reloads the first page of the query the list shows (refresh, recompute, back from a detail). */
+    private fun reload() {
+        val query = pager.query
+        if (query == null) applyFilters() else load(pager.start(query))
+    }
+
+    private fun load(request: Pager.Request<OpportunityQuery>) {
+        if (!request.append) adapter.replace(emptyList())
         loadMore.isEnabled = false
-        call({ api -> api.opportunities(query, PAGE, offset) }, onError = { e ->
-            if (gen == generation) loading = false
+        call({ api -> api.opportunities(request.query, request.limit, request.offset) }, onError = { e ->
+            pager.onError(request)
             loadMore.isEnabled = true
             showError(e)
         }) { page ->
-            if (gen != generation) return@call
-            loading = false
+            if (!pager.onPage(request, page.items.size, page.total)) return@call
             clearError()
-            if (append) adapter.append(page.items) else adapter.replace(page.items)
-            total = page.total
+            if (request.append) adapter.append(page.items) else adapter.replace(page.items)
             updateFooter()
         }
     }
 
     private fun updateFooter() {
-        val hasMore = adapter.count < total
-        loadMore.visibility = if (hasMore) View.VISIBLE else View.GONE
+        loadMore.visibility = if (pager.hasMore) View.VISIBLE else View.GONE
         loadMore.isEnabled = true
         empty.visibility = if (adapter.count == 0) View.VISIBLE else View.GONE
-        summary.text = getString(R.string.opp_count, adapter.count, total)
+        summary.text = getString(R.string.opp_count, adapter.count, pager.total)
     }
 
     @Deprecated("Framework Activity result API")

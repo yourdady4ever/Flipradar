@@ -7,9 +7,15 @@ RSS-Bridge on the LAN), so they are not SSRF-filtered; they ARE size-capped (2 M
 ``defusedxml`` (no entity expansion / external entities).
 
 Prices are extracted conservatively from the title (then the description) in Mexican formats such as
-``$12,999``, ``$12,999.00``, ``MXN 12999``, ``12 999 pesos``.  An item is SKIPPED when there is no
-price, more than one distinct price (e.g. "antes $15,999 ahora $12,999"), a "desde"/"a partir de"
-(from) qualifier, or only US-dollar amounts.  Nothing is guessed.
+``$12,999``, ``$12,999.00``, ``MXN 12999``, ``$12 999 pesos``.  Amounts that are not the item price are
+ignored: installments ("12 MSI de $749", "$749 mensuales") and free-shipping thresholds ("envío gratis en
+compras mayores a $299").  An item is SKIPPED when there is no price, more than one distinct price (e.g.
+"antes $15,999 ahora $12,999"), a "desde"/"a partir de" (from) qualifier, a coupon/discount/savings
+amount ("cupón de $1,500", "$3,000 de descuento": is the other amount before or after it?), only
+US-dollar amounts, or a space-separated number that may be a model number plus a price
+("Xbox 360 500 pesos", "Switch 2 999 pesos"; "$12 999" without "pesos"/"MXN" after it).  A space-grouped
+amount is read as one number only right after a currency marker ($, MXN), a delimiter (":", "(", " - ")
+or at the start of the text.  Nothing is guessed.
 """
 
 from __future__ import annotations
@@ -50,7 +56,9 @@ FEED_ACCEPT = "application/rss+xml, application/atom+xml, application/xml;q=0.9,
 # ------------------------------------------------------------------------------------------------
 
 _INT_COMMA = r"\d{1,3}(?:,\d{3})+"  # 12,999
-_INT_SPACE = r"\d{1,3}(?:[  ]\d{3})+"  # 12 999 (only accepted when followed by "pesos"/"MXN")
+# 12 999 - only in _CODE_AFTER ("... pesos"/"MXN"), never right after a letter ("A54 150" is a model code
+# and 150), and only accepted by _scan when anchored (see _SPACED_ANCHOR)
+_INT_SPACE = r"(?<!\w)\d{1,3}(?:[  ]\d{3})+"
 _INT_PLAIN = r"\d+"
 _DEC_END = r"(?:\.(?P<dec>\d{2}))?(?!\d|[.,]\d)"  # optional 2-digit cents; reject "12.999" / "12,99"
 _NUM = rf"(?<![\d.,])(?P<int>{_INT_COMMA}|{_INT_PLAIN}){_DEC_END}"
@@ -63,7 +71,39 @@ _CODE_FIRST = re.compile(r"\b(?:MXN|MN)\s?\$?\s?" + _NUM, re.IGNORECASE)
 _CODE_AFTER = re.compile(_NUM_SPACED + r"\s?(?:pesos\b|mxn\b|m\.n\.)", re.IGNORECASE)
 _USD_AFTER = re.compile(r"^\s?(?:usd|us\$|dls|dlls|d[oó]lares)\b", re.IGNORECASE)
 _USD_BEFORE = re.compile(r"(?:\bUS|U\$S|\bUSD)\s?$", re.IGNORECASE)
-_FROM_QUALIFIER = re.compile(r"(?:\bdesde|\ba partir de)\s*$", re.IGNORECASE)
+# a short amount followed by a 3-digit group: "$12 999" (12,999?) or "$999 128GB" (999 and 128GB?)
+_GROUP_FOLLOWS = re.compile(r"[  ]\d{3}(?!\d)")
+# what may precede a space-grouped amount for it to be read as ONE number (text before it, right-stripped)
+_SPACED_ANCHOR = re.compile(r"(?:^|[$:(\[|=]|(?:^|\s)[-–—]|\b(?:MXN|MN)|M\.N\.)$", re.IGNORECASE)
+
+# Context around an amount, matched on accent-stripped lower-case text.  `before` ends right before the
+# amount (currency marker removed, right-stripped); `after` starts right after it (currency word removed).
+_CURRENCY_TAIL = re.compile(r"(?:\b(?:mxn?|mn)|m\.n\.)?\s*\$?\s*$")
+_CURRENCY_HEAD = re.compile(r"^\s*(?:(?:mxn|pesos)\b|m\.n\.)?\s*")
+_FROM_BEFORE = re.compile(r"(?:\bdesde|\ba partir de)$")
+_THRESHOLD_BEFORE = re.compile(
+    r"(?:\b(?:compras?|pedidos?)\s+(?:(?:mayores|superiores|minimas)\s+(?:a|de)|de\s+mas\s+de|arriba\s+de"
+    r"|desde|a\s+partir\s+de|de)|\benvio\s+gratis\s+(?:desde|a\s+partir\s+de|arriba\s+de))$"
+)
+_INSTALLMENT_BEFORE = re.compile(
+    r"\b(?:msi|meses(?:\s+sin\s+intereses)?|mensualidades|pagos(?:\s+(?:fijos|mensuales|quincenales|semanales))?"
+    r"|quincenas|semanas)\s+(?:de|por|x)$"
+)
+_INSTALLMENT_AFTER = re.compile(
+    r"^(?:mensuales|al\s+mes|por\s+mes|x\s+mes|/\s*mes|quincenales|a\s+la\s+quincena|por\s+quincena"
+    r"|semanales|a\s+la\s+semana|por\s+semana)\b"
+)
+_DISCOUNT_BEFORE = re.compile(
+    r"(?:\b(?:cupon(?:es)?|descuentos?|bonificacion(?:es)?|cashback|reembolso|rebaja)\s+de"
+    r"|\bahorr(?:a|as|e|o)(?:\s+de)?)(?:\s+hasta)?$"
+)
+_DISCOUNT_AFTER = re.compile(
+    r"^(?:(?:de\s+)?(?:descuento|ahorro|bonificacion|cashback|reembolso|rebaja)|(?:en|de)\s+monedero|off)\b"
+)
+
+_AMBIGUOUS_SPACED = "ambiguous space-separated amount"
+_FROM_PRICE = "'from' price qualifier"
+_DISCOUNT_AMOUNT = "discount/coupon amount"
 
 
 @dataclass
@@ -84,44 +124,95 @@ def _to_cents(int_part: str, dec_part: str | None) -> int | None:
     return pesos_to_cents(amount)
 
 
-def _scan(text: str) -> tuple[list[int], bool]:
-    """Return (MXN amounts in cents, saw a 'from' qualifier).  Amounts marked as USD are ignored."""
+def _amount_role(text: str, start: int, end: int) -> str:
+    """'price', or what else the amount at text[start:end] is: 'installment', 'threshold', 'discount' or
+    'from' (a lower bound)."""
+    before = _CURRENCY_TAIL.sub("", strip_accents(text[max(0, start - 40) : start]).lower(), count=1).rstrip()
+    after = _CURRENCY_HEAD.sub("", strip_accents(text[end : end + 30]).lower(), count=1)
+    if _THRESHOLD_BEFORE.search(before):
+        return "threshold"
+    if _INSTALLMENT_BEFORE.search(before) or _INSTALLMENT_AFTER.match(after):
+        return "installment"
+    if _DISCOUNT_BEFORE.search(before) or _DISCOUNT_AFTER.match(after):
+        return "discount"
+    if _FROM_BEFORE.search(before):
+        return "from"
+    return "price"
+
+
+def _scan(text: str) -> tuple[list[int], set[str], set[str]]:
+    """Return (MXN amounts in cents that may be the item price, reasons the price is ambiguous, roles of the
+    amounts ignored as not being the item price).  Amounts marked as USD are ignored."""
     amounts: list[int] = []
+    problems: set[str] = set()
+    ignored: set[str] = set()
     spans: list[tuple[int, int]] = []
-    qualifier = False
+    pending: list[tuple[int, int]] = []  # "$12" in "$12 999": resolved only by a "12 999 pesos" match
     for pattern in (_CODE_FIRST, _DOLLAR, _CODE_AFTER):
         for match in pattern.finditer(text):
             start, end = match.span()
             if any(start < s_end and s_start < end for s_start, s_end in spans):
                 continue  # already covered by a more specific pattern
-            spans.append((start, end))
             if pattern is _DOLLAR and (
                 _USD_BEFORE.search(text[max(0, start - 6) : start]) or _USD_AFTER.match(text[end : end + 10])
             ):
+                spans.append((start, end))
                 continue
-            cents = _to_cents(match.group("int"), match.group("dec"))
+            int_part, dec_part = match.group("int"), match.group("dec")
+            if (
+                pattern is not _CODE_AFTER
+                and dec_part is None
+                and int_part.isdigit()
+                and len(int_part) <= 3
+                and _GROUP_FOLLOWS.match(text, end)
+            ):
+                pending.append((start, end))
+                continue
+            spans.append((start, end))
+            if any(c in int_part for c in " \u00a0") and not _SPACED_ANCHOR.search(
+                text[: match.start("int")].rstrip()
+            ):
+                problems.add(_AMBIGUOUS_SPACED)  # "Xbox 360 500 pesos": 360,500 or a 360 at 500?
+                continue
+            cents = _to_cents(int_part, dec_part)
             if cents is None:
                 continue
-            if _FROM_QUALIFIER.search(text[max(0, start - 20) : start]):
-                qualifier = True
+            role = _amount_role(text, start, end)
+            if role in ("installment", "threshold"):
+                ignored.add(role)
+                continue
+            if role == "from":
+                problems.add(_FROM_PRICE)
+            elif role == "discount":
+                problems.add(_DISCOUNT_AMOUNT)
             amounts.append(cents)
-    return amounts, qualifier
+    if any(
+        not any(p_start < s_end and s_start < p_end for s_start, s_end in spans) for p_start, p_end in pending
+    ):
+        problems.add(_AMBIGUOUS_SPACED)  # "$12 999" not followed by pesos/MXN, "$999 128GB"
+    return amounts, problems, ignored
 
 
 def extract_price(title: str, description: str | None = None) -> PriceExtraction:
     """Single unambiguous MXN price from the title, else from the description; otherwise None."""
+    ignored_roles: set[str] = set()
     for label, text in (("title", title or ""), ("description", description or "")):
         if not text:
             continue
-        amounts, qualifier = _scan(text)
+        amounts, problems, ignored = _scan(text)
+        ignored_roles |= ignored
         distinct = sorted(set(amounts))
+        if problems:
+            return PriceExtraction(None, f"{'; '.join(sorted(problems))} in {label}", distinct)
         if not distinct:
             continue
-        if qualifier:
-            return PriceExtraction(None, f"'from' price qualifier in {label}", distinct)
         if len(distinct) > 1:
             return PriceExtraction(None, f"{len(distinct)} different prices in {label}", distinct)
         return PriceExtraction(distinct[0], f"single price in {label}", distinct)
+    if ignored_roles:
+        return PriceExtraction(
+            None, f"no MXN price found (ignored {' and '.join(sorted(ignored_roles))} amounts)"
+        )
     return PriceExtraction(None, "no MXN price found")
 
 
@@ -378,7 +469,8 @@ class RssDealsCollector(Collector):
         for attempt in range(2):
             wait = 0.0
             try:
-                async with self.client.stream("GET", url, headers={"Accept": FEED_ACCEPT}) as response:
+                headers = {"Accept": FEED_ACCEPT, "Accept-Encoding": netguard.ACCEPT_ENCODING}
+                async with self.client.stream("GET", url, headers=headers) as response:
                     if response.status_code == 429 and attempt == 0:
                         wait = netguard.parse_retry_after(
                             response.headers.get("retry-after"), maximum=self.max_retry_after
@@ -410,8 +502,12 @@ class RssDealsCollector(Collector):
         return listings
 
     async def fetch_latest(self, *, limit: int = 500) -> list[RawListing]:
-        """All priced items of every configured feed (feed capability).  Per-feed errors go to last_errors;
-        raises CollectorError only when every feed failed."""
+        """Priced items of every configured feed, at most ``limit`` (feed capability).  Per-feed errors go to
+        last_errors; raises CollectorError only when every feed failed."""
+        return (await self._fetch_all())[: max(1, int(limit))]
+
+    async def _fetch_all(self) -> list[RawListing]:
+        """Every priced item of every configured feed, in feed order (no overall cap)."""
         if not self.is_configured():
             raise CollectorNotConfigured("no RSS feeds configured (FLIPRADAR_RSS_FEEDS)")
         self.last_errors = {}
@@ -426,14 +522,14 @@ class RssDealsCollector(Collector):
             raise CollectorError(
                 "all RSS feeds failed: " + "; ".join(f"{u}: {e}" for u, e in self.last_errors.items())
             )
-        return listings[: max(1, int(limit))]
+        return listings
 
     async def search(
         self, query: str, *, limit: int = 50, category_id: str | None = None
     ) -> list[RawListing]:
         if not _tokens(query):
             raise CollectorError("empty search query")
-        listings = await self.fetch_latest()
+        listings = await self._fetch_all()  # filter first: later feeds must not be cut off by earlier ones
         return [listing for listing in listings if matches_query(listing.title, query)][: max(1, int(limit))]
 
     async def health(self) -> HealthStatus:

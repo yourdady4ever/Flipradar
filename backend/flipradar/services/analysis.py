@@ -11,9 +11,13 @@ For every product:
    ``default_fee_profile_key_used`` for used/unknown), fresh risk codes and the last 30 days of price
    observations.  Only listings from Mexican marketplace/manual sources are resale comparables
    (``ListingView.resale_reference``); eBay US, deal feeds and single retailer pages are buy-side only.
+   Items that ship from abroad carry estimated Mexican import duties (``finance.import_costs``, courier
+   regime: USMCA rate for US/CA origins, non-FTA rate otherwise, at the FX rate stored on the listing).
 3. **Persist** - upsert Opportunity rows (unique per buy listing + fee profile).  User decisions are
-   preserved (``seen``/``watching``/``dismissed``/``bought`` keep their status); opportunities that are no
-   longer returned become ``expired`` unless the user bought or dismissed them.
+   preserved (``seen``/``watching``/``dismissed``/``bought`` keep their status), also when the fee profile
+   key changes (the existing row of the buy listing is re-keyed in place) or the listing moves to another
+   product; opportunities that are no longer returned become ``expired`` unless the user bought or
+   dismissed them.
 4. **Alerts** - created/changed opportunities are evaluated against alert rules (committed first,
    delivered afterwards so slow push channels never hold the SQLite write lock).
 
@@ -37,9 +41,11 @@ from ..config import Settings, get_settings
 from ..engine import opportunities as opp_engine
 from ..engine import risk as risk_engine
 from ..engine import stats as stats_engine
+from ..engine.explain import fmt_money, fmt_pct_bp
 from ..engine.opportunities import AnalysisSettings
 from ..engine.types import ListingView, OpportunityCandidate, RiskFlag
 from ..finance.calculator import FeeModel
+from ..finance.import_costs import estimate_import_costs, select_rule
 from ..models import (
     FeeProfile,
     Listing,
@@ -66,6 +72,15 @@ NEVER_EXPIRE = frozenset({OpportunityStatus.BOUGHT.value, OpportunityStatus.DISM
                           OpportunityStatus.EXPIRED.value})
 _COMPARE_FIELDS = ("buy_total_cents", "expected_sale_cents", "net_profit_cents", "roi_bp", "margin_bp", "score",
                    "confidence", "comparable_count", "risk_flags_json", "fee_profile_key")
+# Which row of a buy listing inherits a new fee profile key: the strongest user decision wins.
+_STATUS_PRIORITY = {
+    OpportunityStatus.BOUGHT.value: 0,
+    OpportunityStatus.DISMISSED.value: 1,
+    OpportunityStatus.WATCHING.value: 2,
+    OpportunityStatus.SEEN.value: 3,
+    OpportunityStatus.NEW.value: 4,
+    OpportunityStatus.EXPIRED.value: 5,
+}
 
 
 RESALE_SOURCE_KINDS = frozenset({SourceKind.MARKETPLACE.value, SourceKind.MANUAL.value, SourceKind.DEMO.value})
@@ -97,6 +112,59 @@ def default_fee_model(
     return FeeModel.from_profile(row)
 
 
+USMCA_ORIGINS = frozenset({"US", "CA"})
+
+
+def origin_country(listing: Listing) -> str:
+    """ISO country the item ships from: the source-reported item location (eBay ``item_location_country``)
+    when present, else the source's country (MX when unknown)."""
+    source_attributes = (listing.attributes_json or {}).get("source_attributes")
+    if isinstance(source_attributes, dict):
+        location = source_attributes.get("item_location_country")
+        if isinstance(location, str) and len(location.strip()) == 2:
+            return location.strip().upper()
+    country = listing.source.country if listing.source is not None else None
+    return (country or "MX").upper()
+
+
+def import_estimate(listing: Listing) -> tuple[bool, int | None, str | None]:
+    """(import required, estimated duties in MXN centavos or None, note) for buying ``listing``.
+
+    Items shipping from outside Mexico pay the courier-regime global rate on the customs value (item
+    price + international shipping, USD) at the USD->MXN rate stored on the listing.  Duties are None
+    (never guessed) when they cannot be estimated: formal import above the courier limit, or no USD price.
+    """
+    origin = origin_country(listing)
+    if origin == "MX":
+        return False, None, None
+    rule_key = "courier_usmca" if origin in USMCA_ORIGINS else "courier_non_fta"
+    if (listing.currency or "").upper() != "USD" or listing.fx_rate is None:
+        return True, None, (
+            f"Ships from {origin}: import duties cannot be estimated without a USD price and USD/MXN rate, "
+            "so no profit is estimated."
+        )
+    rate = Decimal(repr(listing.fx_rate))
+    shipping_usd = int(listing.shipping_cents or 0)
+    estimate = estimate_import_costs(int(listing.price_cents), shipping_usd, rule_key, rate,
+                                     fx_source=listing.fx_source or "listing")
+    customs = f"customs value USD {Decimal(estimate['customs_value_usd_cents']) / 100:,.2f}"
+    shipping_text = "item + international shipping" if listing.shipping_cents is not None else (
+        "item only; international shipping not reported")
+    if select_rule(rule_key, estimate["customs_value_usd_cents"]).formal_import_required:
+        return True, None, (
+            f"Ships from {origin}: {customs} is above the courier-regime limit, so a formal import is required "
+            "and duties cannot be estimated; no profit is estimated."
+        )
+    note = (
+        f"Ships from {origin}: estimated import duties {fmt_money(estimate['duties_mxn_cents'])} = {customs} "
+        f"({shipping_text}) x {estimate['usd_mxn_rate']} MXN/USD ({estimate['fx_source']}) x "
+        f"{fmt_pct_bp(estimate['duty_rate_bp'])} global rate, rule '{estimate['rule_key']}' as of "
+        f"{estimate['as_of'] or 'unknown'}. A customs processing fee (DTA) and carrier brokerage fees may "
+        "still apply; not legal advice."
+    )
+    return True, int(estimate["duties_mxn_cents"]), note
+
+
 def shipping_mxn_cents(listing: Listing) -> int | None:
     if listing.shipping_cents is None:
         return None
@@ -126,6 +194,7 @@ def listing_view(listing: Listing, product_key: str | None, now: datetime) -> Li
     attributes["risk_codes"] = _risk_codes(flags)
     attributes["risk_flags"] = flags
     attributes["hours_since_seen"] = max(0, int((now - last_seen).total_seconds() // 3600))
+    import_required, import_costs, import_note = import_estimate(listing)
     return ListingView(
         id=listing.id,
         source_key=listing.source.key if listing.source is not None else "",
@@ -149,6 +218,9 @@ def listing_view(listing: Listing, product_key: str | None, now: datetime) -> Li
         is_demo=bool(listing.is_demo),
         attributes=attributes,
         resale_reference=is_resale_reference(listing.source),
+        import_required=import_required,
+        import_costs_mxn_cents=import_costs,
+        import_note=import_note,
     )
 
 
@@ -226,6 +298,19 @@ def _products_to_analyze(session: Session, product_ids: Iterable[int] | None) ->
     return list(session.scalars(stmt.where(Product.id.in_(with_listings))))
 
 
+def _row_to_rekey(
+    existing: dict[tuple[int, str], Opportunity], returned: set[tuple[int, str]], buy_listing_id: int
+) -> Opportunity | None:
+    """An existing row of ``buy_listing_id`` under another fee profile key (strongest user status first)."""
+    rows = [
+        opp for key, opp in existing.items()
+        if key[0] == buy_listing_id and key not in returned
+    ]
+    if not rows:
+        return None
+    return min(rows, key=lambda opp: (_STATUS_PRIORITY.get(opp.status, len(_STATUS_PRIORITY)), -(opp.id or 0)))
+
+
 def analyze_one_product(
     session: Session,
     product: Product,
@@ -283,6 +368,16 @@ def analyze_one_product(
         returned.add(key)
         values = _candidate_values(cand)
         opp = existing.get(key)
+        rekeyed = False
+        if opp is None:
+            # The fee profile key changed (setting or condition class): keep the listing's row and its user
+            # status instead of creating a fresh NEW row next to it.
+            opp = _row_to_rekey(existing, returned, cand.buy.id)
+            if opp is not None:
+                del existing[(opp.buy_listing_id, opp.fee_profile_key)]
+                opp.fee_profile_key = cand.fee_profile_key
+                existing[key] = opp
+                rekeyed = True
         if opp is None:
             opp = Opportunity(
                 product_id=product.id,
@@ -295,7 +390,7 @@ def analyze_one_product(
             created += 1
             touched.append(opp)
             continue
-        changed = any(getattr(opp, f) != values[f] for f in _COMPARE_FIELDS if f in values)
+        changed = rekeyed or any(getattr(opp, f) != values[f] for f in _COMPARE_FIELDS if f in values)
         if opp.explanation_facts_json != values["explanation_facts_json"]:
             changed = True
             opp.ai_summary = None  # a summary of old facts must not survive a recompute
@@ -313,12 +408,29 @@ def analyze_one_product(
     for key, opp in existing.items():
         if key in returned or opp.status in NEVER_EXPIRE:
             continue
-        if opp.product_id != product.id and opp.buy_listing_id not in own_listing_ids:
-            continue  # belongs to another product analysed separately
+        if opp.buy_listing_id not in own_listing_ids:
+            owner = opp.buy_listing.product_id if opp.buy_listing is not None else None
+            if owner is not None and owner != product.id:
+                continue  # the listing moved to another product, whose analysis takes this row over
         opp.status = OpportunityStatus.EXPIRED.value
         expired += 1
     session.flush()
     return touched, created, updated, expired
+
+
+def _expire_stale_buys(session: Session, a: AnalysisSettings, now: datetime) -> int:
+    """Expire open opportunities whose buy listing was not seen within the buy window, also for products
+    this recompute did not analyse (the engine never returns such a listing as a candidate)."""
+    cutoff = now - timedelta(days=min(a.buy_max_age_days, a.comparable_max_age_days))
+    stale = session.scalars(
+        select(Opportunity)
+        .join(Listing, Opportunity.buy_listing_id == Listing.id)
+        .where(Opportunity.status.not_in(NEVER_EXPIRE), Listing.last_seen_at < cutoff)
+    ).all()
+    for opp in stale:
+        opp.status = OpportunityStatus.EXPIRED.value
+    session.flush()
+    return len(stale)
 
 
 def recompute(
@@ -358,6 +470,7 @@ def recompute(
         created += c
         updated += u
         expired += e
+    expired += _expire_stale_buys(session, base, now)
     session.commit()
     if failed:
         log.warning("recompute: %d of %d product(s) failed; see the log", failed, len(products))

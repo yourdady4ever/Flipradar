@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -20,6 +21,7 @@ BANXICO_URL = "https://www.banxico.org.mx/SieAPIRest/service/v1/series/SF43718/d
 FRANKFURTER_URL = "https://api.frankfurter.dev/v1/latest"
 ER_API_URL = "https://open.er-api.com/v6/latest/USD"
 TOKEN = "a" * 64
+TODAY = date(2026, 11, 1)  # the chain skips quotes older than 7 days; fixtures are dated 2026-10-30/31
 
 
 def load(name):
@@ -103,7 +105,7 @@ def test_chain_prefers_banxico():
         frank = router.get(FRANKFURTER_URL).mock(
             return_value=httpx.Response(200, json=load("frankfurter_latest.json"))
         )
-        quote = run(fx_sources.get_usd_mxn(settings))
+        quote = run(fx_sources.get_usd_mxn(settings, today=TODAY))
         assert frank.call_count == 0
     assert quote == fx_sources.FxQuote(
         Decimal("18.1234"), "2026-10-30", "banxico_fix", fx_sources.BANXICO_ATTRIBUTION, True
@@ -118,7 +120,7 @@ def test_chain_falls_back_to_frankfurter():
             return_value=httpx.Response(200, json=load("frankfurter_latest.json"))
         )
         er = router.get(ER_API_URL)
-        quote = run(fx_sources.get_usd_mxn(settings))
+        quote = run(fx_sources.get_usd_mxn(settings, today=TODAY))
         assert parse_qs(frank.calls[0].request.url.query.decode()) == {"base": ["USD"], "symbols": ["MXN"]}
         assert er.call_count == 0
     assert quote.rate == Decimal("18.1012")
@@ -134,10 +136,10 @@ def test_chain_without_token_uses_exchangerate_api_last():
         banxico = router.get(BANXICO_URL)
         router.get(FRANKFURTER_URL).mock(return_value=httpx.Response(503))
         er = router.get(ER_API_URL).mock(return_value=httpx.Response(200, json=load("er_api_latest.json")))
-        quote = run(fx_sources.get_usd_mxn(settings))
+        quote = run(fx_sources.get_usd_mxn(settings, today=TODAY))
         assert banxico.call_count == 0
         # second call within 24 h is served from the in-process cache (open access terms)
-        again = run(fx_sources.get_usd_mxn(settings))
+        again = run(fx_sources.get_usd_mxn(settings, today=TODAY))
         assert er.call_count == 1
     assert quote == again
     assert quote.rate == Decimal("18.0567")

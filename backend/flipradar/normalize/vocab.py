@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import ROUND_FLOOR, Decimal
 
 # ------------------------------------------------------------------------------------------------
 # Categories
@@ -204,6 +205,31 @@ FOR_PARTS_CUES: tuple[str, ...] = (
     r"cuenta\sicloud",
     r"imei\sreportado",
     r"reportad[oa]",
+    # repair needed / defects (MX phrasing)
+    r"para\sreparar",
+    r"a\sreparar",
+    r"(?:necesita|requiere)\sreparacion",
+    r"no\ssirve",
+    r"con\sfallas?",
+    r"fallas?\sde\s(?:senal|red|audio|camara|imagen|carga|bocina|microfono|touch|face\sid)",
+    r"no\scarga",
+    r"mojad[oa]",
+    r"(?:cristal|vidrio|display|tapa(?:\strasera)?|camara)\s(?:rot[oa]|estrellad[oa]|quebrad[oa])",
+    r"pantalla\s(?:estrellada|quebrada)",
+    r"bateria\s(?:inflada|hinchada)",
+    r"no\sda\s(?:imagen|video)",
+    r"(?:en|por)\spartes",
+    r"(?:sin|no)\s(?:face|touch)\sid",
+    r"(?:face|touch)\sid\s(?:no\sfunciona|no\ssirve|fallando|danado|desactivado)",
+    # US phrasing (eBay): carrier/blacklist locks make the phone unusable as an unlocked MX resale unit
+    r"(?:carrier|network|sim|icloud|verizon|at\st|att|t\smobile|tmobile|sprint|cricket|metro(?:\spcs)?|"
+    r"boost(?:\smobile)?|tracfone|straight\stalk|us\scellular|xfinity|visible)\slocked",
+    r"locked\sto\s(?:carrier|network|verizon|at\st|att|t\smobile|tmobile|sprint|cricket)",
+    r"blacklist(?:ed)?",
+    r"bad\s(?:esn|imei)",
+    r"cracked(?:\s(?:screen|glass|back|lcd|display))?",
+    r"(?:broken|shattered)\s(?:screen|glass|lcd|display)",
+    r"water\sdamaged?",
 )
 
 #: Weaker subset used for descriptions (long free text produces more false positives).
@@ -217,7 +243,15 @@ FOR_PARTS_DESCRIPTION_CUES: tuple[str, ...] = (
     r"no\sprende",
     r"imei\sreportado",
     r"bloquead[oa]\spor\sicloud",
+    r"para\sreparar",
+    r"bateria\s(?:inflada|hinchada)",
+    r"no\sda\s(?:imagen|video)",
+    r"blacklist(?:ed)?",
+    r"bad\s(?:esn|imei)",
 )
+
+#: Packaging words: a "dañado" right after one of them describes the box, not the item ("caja dañada").
+PACKAGING_WORDS: frozenset[str] = frozenset({"caja", "empaque", "empaques", "embalaje", "envoltura", "box", "blister"})
 
 REFURBISHED_CUES: tuple[str, ...] = (
     r"reacondicionad[oa]s?",
@@ -242,6 +276,11 @@ USED_CUES: tuple[str, ...] = (
     r"segunda\smano",
     r"buen\sestado",
     r"detalles\sesteticos",
+    # opened / unboxed: not sealed-new stock ("nuevo abierto", "nuevo sin caja"), but "abierto a ofertas"
+    # is about the price
+    r"abiert[oa]s?(?!\s(?:a|al|para)(?!\w))",
+    r"sin\scaja",
+    r"sin\ssellos?",
 )
 
 NEW_CUES: tuple[str, ...] = (
@@ -250,7 +289,7 @@ NEW_CUES: tuple[str, ...] = (
     r"brand\snew",
     r"sellad[oa]s?",
     r"sealed",
-    r"nuev[oa]s?",
+    r"nuev[oa]s?(?!\s(?:leon|laredo)(?!\w))",  # "Nuevo León" / "Nuevo Laredo" are places
     r"new",
 )
 
@@ -294,6 +333,8 @@ SOURCE_CONDITION_MAP: dict[str, str] = {
     "for parts": "for_parts",
     "para piezas": "for_parts",
     "para refacciones": "for_parts",
+    "damaged": "for_parts",  # schema.org DamagedCondition (collectors/jsonld.py)
+    "damaged condition": "for_parts",
 }
 
 #: eBay numeric conditionId -> Condition value (https://developer.ebay.com/api-docs/sell/static/metadata/condition-id-values.html)
@@ -351,6 +392,9 @@ STRONG_ACCESSORY_WORDS: tuple[tuple[str, str], ...] = (
     (r"repuestos?", "spare_part"),
     (r"refaccion(?:es)?", "spare_part"),
     (r"flex", "spare_part"),
+    (r"helices?", "spare_part"),  # drone propellers
+    (r"propelas?", "spare_part"),
+    (r"propellers?", "spare_part"),
     (r"teclado", "keyboard"),
     (r"keyboard", "keyboard"),
 )
@@ -458,6 +502,15 @@ BUNDLE_CUES: tuple[str, ...] = (
     r"pack",
     r"fly\smore",
     r"^(?:pack\s|paquete\s|lote\s|set\s)?\d{1,2}\s?x(?!\w)",
+    r"(?<![\w.])(?:[2-9]|dos|tres|cuatro|cinco)\s(?:piezas|pzas?|pz|pcs|unidades|equipos)(?!\w)",  # "(2 piezas)"
+    r"(?<!\w)(?:control(?:es)?|mandos?|joycons?|dualsense)\s(?:extra|adicional(?:es)?)(?!\w)",  # "con control extra"
+    r"(?<!\w)(?:con|\+|y|mas|incluye)\s(?:el\s|un\s|unos\s|lentes\s)?(?:ps\s?vr|vr\s?2|playstation\svr)",  # + PS VR2
+    r"^(?:un\s)?par\sde\s",  # "Par de AirPods": two units, or loose earbuds - never one standard unit
+)
+
+#: Leading quantity words ("2 PS5 Slim", "Dos iPhone 13"): a bundle when a brand/model follows.
+LEADING_QUANTITIES: frozenset[str] = frozenset(
+    {"2", "3", "4", "5", "6", "7", "8", "9", "10", "dos", "tres", "cuatro", "cinco", "seis"}
 )
 
 #: "incluye ..." is a bundle unless it only lists in-box standard items.
@@ -583,6 +636,27 @@ PREFIX_FILLERS: frozenset[str] = frozenset(
 )
 
 
+#: Words after a console name that still describe the console itself (condition, edition, revision,
+#: standard parts).  Any other word after a bare console name ("Nintendo Switch Mario Kart 8 Deluxe",
+#: "PS5 Spider-Man 2") makes the listing ambiguous: it is probably a game or an accessory.
+SUFFIX_FILLERS: frozenset[str] = frozenset(
+    {
+        "usado", "usada", "usados", "usadas", "seminuevo", "seminueva", "seminuevos", "nuevo", "nueva", "nuevos",
+        "sellado", "sellada", "original", "originales", "reacondicionado", "reacondicionada", "excelente",
+        "excelentes", "estado", "buen", "buena", "bueno", "perfecto", "perfecta", "perfectas", "perfectamente",
+        "impecable", "impecables", "funcionando", "funciona", "funcional", "bien", "detalle", "detalles",
+        "garantia", "factura", "envio", "gratis", "completo", "completa", "completos", "poco", "uso",
+        "oportunidad", "remate", "oferta", "barato", "barata", "liberado", "liberada", "desbloqueado",
+        "desbloqueada", "version", "edicion", "modelo", "model", "color", "mexicana", "mexicano", "mx",
+        "americana", "americano", "japonesa", "japones", "neon", "v1", "v2", "normal", "fat", "estandar",
+        "standard", "lector", "discos", "disco", "disc", "digital", "sin", "no", "es", "ni", "en", "caja", "cajas",
+        "accesorios", "listo", "lista", "como", "hdmi", "micro", "sd", "microsd", "joycon", "joycons",
+        "dualsense", "dualshock", "heg", "hdh", "hac", "cfi", "001", "pulgadas", "pantalla", "oled", "lcd",
+        "portatil", "consola", "videoconsola", "hibrida", "sus", "su", "todo", "todos", "solo", "unico", "unica",
+        "dueno", "duena", "mi", "x", "s",
+    }
+)
+
 # ------------------------------------------------------------------------------------------------
 # Generation / ordinal helpers
 # ------------------------------------------------------------------------------------------------
@@ -637,6 +711,32 @@ def next_tokens(text: str, pos: int, n: int = 4) -> list[str]:
 def has(text: str, pattern: str) -> bool:
     """Whole-word regex search on normalized text."""
     return re.search(r"(?<!\w)(?:" + pattern + r")(?!\w)", text) is not None
+
+
+#: Words that negate a following variant word ("no es OLED", "sin cancelacion de ruido", "no lite").
+_VARIANT_NEGATORS = frozenset({"no", "sin", "ni", "not", "non"})
+#: Words allowed between the negator and the variant word ("no es la OLED", "no es modelo lite").
+_VARIANT_NEGATION_GLUE = frozenset(
+    {"es", "esta", "son", "is", "la", "el", "una", "un", "modelo", "version", "edicion", "model", "the", "a"}
+)
+
+
+def is_negated(text: str, pos: int) -> bool:
+    """True when the word at ``pos`` is negated by up to three preceding words ("no es la OLED")."""
+    for tok in reversed(text[:pos].split()[-3:]):
+        if tok in _VARIANT_NEGATORS:
+            return True
+        if tok not in _VARIANT_NEGATION_GLUE:
+            return False
+    return False
+
+
+def affirmed(text: str, pattern: str) -> bool:
+    """Like :func:`has` but ignores negated mentions: a seller writing "no es OLED" or "no lite" says the
+    unit is NOT that variant, so the word must never promote the model to it."""
+    return any(
+        not is_negated(text, m.start()) for m in re.finditer(r"(?<!\w)(?:" + pattern + r")(?!\w)", text)
+    )
 
 
 # ------------------------------------------------------------------------------------------------
@@ -694,12 +794,16 @@ def _suffix(text: str, pos: int, options: tuple[str, ...], n: int = 3) -> str:
     return ""
 
 
-def _net(text: str, pos: int, n: int = 4) -> str:
-    """' 5g' / ' 4g' when the network generation is stated right after the model name."""
-    nxt = next_tokens(text, pos, n)
-    if "5g" in nxt:
+def _net(text: str, pos: int) -> str:
+    """' 5g' / ' 4g' when the network generation is stated after the model name.
+
+    The whole rest of the title is scanned: sellers often put it last ("Redmi Note 13 Pro 8gb Ram 256gb
+    Rom 5G"), and the 4G and 5G versions are different products with different prices.
+    """
+    rest = text[pos:]
+    if affirmed(rest, "5g"):
         return " 5g"
-    if "4g" in nxt:
+    if affirmed(rest, "4g"):
         return " 4g"
     return ""
 
@@ -745,7 +849,7 @@ def _iphone(m: re.Match[str], text: str) -> Built:
         suffix = "e"
     elif plus:  # "iphone 15+" (attached); a spaced " + " is a bundle separator, not the Plus model
         suffix = "plus"
-    elif nxt[:2] == ["pro", "max"]:
+    elif nxt[:2] == ["pro", "max"] or nxt[:1] == ["pm"]:  # "PM": common MX shorthand for Pro Max
         suffix = "pro max"
     elif nxt[:1] == ["pro"]:
         suffix = "pro"
@@ -775,7 +879,7 @@ def _airpods(m: re.Match[str], text: str) -> Built:
             return Built(f"airpods pro {gen}")
         return _amb("AirPods Pro generation not stated (Pro 1/2/3 differ a lot in price)")
     if gen in (1, 2, 3, 4):
-        if gen == 4 and has(text, r"anc|cancelacion(?:\sactiva)?(?:\sde\sruido)?|noise\scancell?ing"):
+        if gen == 4 and affirmed(text, r"anc|cancelacion(?:\sactiva)?(?:\sde\sruido)?|noise\scancell?ing"):
             return Built("airpods 4 anc")
         return Built(f"airpods {gen}")
     return _amb("AirPods generation not stated")
@@ -807,6 +911,32 @@ def _apple_watch(m: re.Match[str], text: str) -> Built:
 _IPAD_A_CHIPS = {"a16": "ipad 11", "a14": "ipad 10", "a13": "ipad 9", "a12": "ipad 8"}
 _IPAD_AIR_GEN_CHIP = {5: "m1", 6: "m2", 7: "m3"}
 
+#: Words after a bare number that make it something other than a screen size ("16 ram", "8 nucleos").
+_NOT_SIZE_AFTER = frozenset({"ram", "gb", "tb", "ssd", "hdd", "nucleos", "cores", "core", "gpu", "cpu", "horas",
+                             "ciclos", "meses", "anos", "dias", "gen", "generacion", "generation"})
+
+
+def inch_token(value: str) -> str:
+    """'12.9' -> '13in', '10.9' -> '11in', '13.6' -> '13in', '15.3' -> '15in' (marketing size class)."""
+    number = Decimal(value)
+    whole = number.to_integral_value(rounding=ROUND_FLOOR)
+    if number - whole >= Decimal("0.85"):
+        whole += 1
+    return f"{int(whole)}in"
+
+
+def _bare_sizes(toks: list[str], allowed: frozenset[str]) -> list[str]:
+    """Screen sizes written as bare numbers ("iPad Pro M4 11", "MacBook Air 15.3") -> inch tokens."""
+    sizes = []
+    for i, tok in enumerate(toks):
+        if tok in allowed and not (i + 1 < len(toks) and toks[i + 1] in _NOT_SIZE_AFTER):
+            sizes.append(inch_token(tok))
+    return sizes
+
+
+_IPAD_BARE_SIZES = frozenset({"11", "13", "12.9", "10.9", "10.5", "9.7", "8.3"})
+_MACBOOK_BARE_SIZES = frozenset({"13", "13.3", "13.6", "14", "14.2", "15", "15.3", "16", "16.2"})
+
 
 def _ipad(m: re.Match[str], text: str) -> Built:
     line = m["line"] or "base"
@@ -824,9 +954,12 @@ def _ipad(m: re.Match[str], text: str) -> Built:
         if chip_a and f"a{chip_a.group(1)}" in _IPAD_A_CHIPS:
             return Built(_IPAD_A_CHIPS[f"a{chip_a.group(1)}"])
         return _amb("iPad generation not stated")
-    if direct in (11, 13):
-        tokens = (f"{direct}in",)
-        direct = None
+    if line in ("pro", "air"):
+        # The size may follow the chip ("iPad Pro M4 11"): bare 11/13/12.9 are sizes for these lines.
+        sizes = sorted(set(_bare_sizes(toks[:6], _IPAD_BARE_SIZES)))
+        tokens = tuple(sizes)
+        if direct in (11, 13):
+            direct = None
     if line == "air":
         if chip_m:
             return Built(f"ipad air m{chip_m.group(1)}", tokens)
@@ -861,10 +994,9 @@ def _macbook(m: re.Match[str], text: str) -> Built:
     )
     if not chip:
         return _amb("MacBook chip not stated (Intel or unknown Apple silicon)")
-    tokens: tuple[str, ...] = ()
-    sizes = [t for t in toks[:3] if t in ("13", "14", "15", "16")]
-    if sizes:
-        tokens = (f"{sizes[0]}in",)
+    # Bare sizes anywhere near the name ("MacBook Air 15.3 M2", "MacBook Pro M3 Pro 14"); several different
+    # sizes -> no screen identity (and the key requirement below leaves multi-size lines unclustered).
+    tokens = tuple(sorted(set(_bare_sizes(toks, _MACBOOK_BARE_SIZES))))
     tier = f" {chip.group(2)}" if chip.group(2) else ""
     return Built(f"macbook {line} m{chip.group(1)}{tier}", tokens)
 
@@ -896,7 +1028,7 @@ def _galaxy_s(m: re.Match[str], text: str) -> Built:
 
 
 def _galaxy_am(m: re.Match[str], text: str) -> Built:
-    return Built(f"galaxy {m['line']}{m['num']}{m['s'] or ''}{_net(text, m.end(), 3)}")
+    return Built(f"galaxy {m['line']}{m['num']}{m['s'] or ''}{_net(text, m.end())}")
 
 
 def _galaxy_z(m: re.Match[str], text: str) -> Built:
@@ -905,9 +1037,11 @@ def _galaxy_z(m: re.Match[str], text: str) -> Built:
 
 def _galaxy_tab(m: re.Match[str], text: str) -> Built:
     plus = "+" if m["plus"] else ""
-    suffix = "" if plus else _suffix(text, m.end(), ("ultra", "fe", "plus", "lite", "+"))
+    suffix = "" if plus else _suffix(text, m.end(), ("ultra", "fe+", "fe plus", "fe", "plus", "lite", "+"))
     if suffix in (" plus", " +"):
         suffix, plus = "", "+"
+    if suffix == " fe plus":
+        suffix = " fe+"  # Tab S9 FE+ / S10 FE+: a different (cheaper) model than the flagship Tab S9+
     return Built(f"galaxy tab {m['line']}{m['num']}{plus}{suffix}")
 
 
@@ -944,7 +1078,7 @@ def _redmi_note(m: re.Match[str], text: str) -> Built:
 
 
 def _redmi(m: re.Match[str], text: str) -> Built:
-    return Built(f"redmi {m['num']}{_net(text, m.end(), 3)}")
+    return Built(f"redmi {m['num']}{_net(text, m.end())}")
 
 
 def _poco(m: re.Match[str], text: str) -> Built:
@@ -1034,7 +1168,8 @@ def _realme(m: re.Match[str], text: str) -> Built:
 def _oneplus(m: re.Match[str], text: str) -> Built:
     if m["nnum"]:
         ce = " ce" if " ce" in m.group(0) else ""
-        return Built(f"oneplus nord{ce} {m['nnum']}{_net(text, m.end())}")
+        lite = _suffix(text, m.end(), ("lite",))  # Nord CE4 Lite is a different (cheaper) phone
+        return Built(f"oneplus nord{ce} {m['nnum']}{lite}{_net(text, m.end())}")
     suffix = _suffix(text, m.end(), ("pro",))
     return Built(f"oneplus {m['num']}{m['t'] or ''}{suffix}")
 
@@ -1042,20 +1177,23 @@ def _oneplus(m: re.Match[str], text: str) -> Built:
 # --- Consoles & handheld PCs ---------------------------------------------------------------------
 
 
+def _pro_after(text: str, pos: int) -> bool:
+    """'pro' among the two words after ``pos`` and not negated ("PS5 no pro")."""
+    return affirmed(" ".join(next_tokens(text, pos, 2)), "pro")
+
+
 def _ps5(m: re.Match[str], text: str) -> Built:
-    nxt = next_tokens(text, m.end(), 2)
-    if "pro" in nxt or has(text, r"cfi\s?7\d{0,3}\w?"):
+    if _pro_after(text, m.end()) or has(text, r"cfi\s?7\d{0,3}\w?"):
         return Built("ps5 pro")
-    if has(text, "slim") or has(text, r"cfi\s?2\d{0,3}\w?"):
+    if affirmed(text, "slim") or has(text, r"cfi\s?2\d{0,3}\w?"):
         return Built("ps5 slim")
     return Built("ps5")
 
 
 def _ps4(m: re.Match[str], text: str) -> Built:
-    nxt = next_tokens(text, m.end(), 2)
-    if "pro" in nxt:
+    if _pro_after(text, m.end()):
         return Built("ps4 pro")
-    if has(text, "slim"):
+    if affirmed(text, "slim"):
         return Built("ps4 slim")
     return Built("ps4")
 
@@ -1085,8 +1223,8 @@ _SWITCH_QUANTITY_NOUNS = re.compile(r"juegos?|controles|controls|joycons?|mandos
 def _switch(m: re.Match[str], text: str) -> Built:
     after = [t for t in next_tokens(text, m.end(), 4) if t not in ("modelo", "version", "edicion", "model")]
     two = bool(after[:1] == ["2"] and not (len(after) > 1 and _SWITCH_QUANTITY_NOUNS.fullmatch(after[1])))
-    oled = has(text, "oled")
-    lite = has(text, "lite")
+    oled = affirmed(text, "oled")  # "(no es OLED)" / "no lite" say the unit is NOT that model
+    lite = affirmed(text, "lite")
     if sum((two, oled, lite)) > 1:
         return _amb("conflicting Nintendo Switch models in title")
     if two:
@@ -1099,8 +1237,8 @@ def _switch(m: re.Match[str], text: str) -> Built:
 
 
 def _steam_deck(_m: re.Match[str], text: str) -> Built:
-    oled = has(text, "oled")
-    lcd = has(text, "lcd")
+    oled = affirmed(text, "oled")
+    lcd = affirmed(text, "lcd")
     if oled and lcd:
         return _amb("Steam Deck: both LCD and OLED mentioned")
     if oled:
@@ -1612,6 +1750,66 @@ ACCESSORY_MODELS: dict[str, str] = {
 }
 
 
+#: rule name -> words that turn the family into a DIFFERENT (differently priced) model.  The builders
+#: only look right after the model number; when one of these words appears further on ("Galaxy S24 256gb
+#: Ultra", "RTX 4070 12gb Super", "iPhone 15 256gb Pro Max") and the built model did not consume it, the
+#: title is ambiguous and the hit loses its model (precision first).
+SUFFIX_CHANGERS: dict[str, frozenset[str]] = {
+    "iphone": frozenset({"pro", "max", "plus", "mini", "pm"}),
+    "galaxy_s": frozenset({"ultra", "plus", "fe", "edge"}),
+    "galaxy_z": frozenset({"fe"}),
+    "galaxy_tab": frozenset({"ultra", "fe", "fe+", "plus", "lite"}),
+    "galaxy_watch": frozenset({"classic", "pro", "fe", "ultra"}),
+    "galaxy_buds": frozenset({"pro", "fe", "live", "core"}),
+    "redmi_note": frozenset({"pro", "plus", "pro+"}),
+    "poco": frozenset({"pro", "gt", "ultra", "neo"}),
+    "xiaomi_num": frozenset({"pro", "ultra", "lite"}),
+    "moto_edge": frozenset({"pro", "ultra", "fusion", "neo", "plus"}),
+    "razr": frozenset({"ultra", "plus"}),
+    "pixel": frozenset({"pro", "xl", "fold"}),
+    "huawei": frozenset({"pro", "pro+", "plus", "lite", "ultra", "rs"}),
+    "honor": frozenset({"pro", "lite", "plus", "ultra"}),
+    "oppo": frozenset({"pro", "pro+", "plus", "ultra"}),
+    "realme": frozenset({"pro", "pro+", "plus"}),
+    "oneplus": frozenset({"pro", "lite"}),
+    "rtx": frozenset({"ti", "super"}),
+    "radeon": frozenset({"xt", "xtx", "gre"}),
+}
+
+#: The suffix window ends at a separator: what follows describes another, included item.
+_SUFFIX_WINDOW_STOP = frozenset(
+    {"+", "con", "y", "e", "mas", "incluye", "incluido", "incluida", "para", "compatible", "for", "with", "and",
+     "o", "vs", "regalo"}
+)
+_SUFFIX_WINDOW = 6
+
+
+def _model_words(model: str) -> set[str]:
+    """Words a built model name 'consumes' ('galaxy s24+' also consumes 'plus' and '+')."""
+    words: set[str] = set()
+    for tok in model.split():
+        words.add(tok)
+        if tok.endswith("+"):
+            words.update({tok[:-1], "plus", "+"})
+    if "pro max" in model:
+        words.add("pm")
+    return words
+
+
+def _unconsumed_suffix(hit: ModelHit, text: str, window_end: int) -> str | None:
+    changers = SUFFIX_CHANGERS.get(hit.rule)
+    if not changers or hit.model is None:
+        return None
+    consumed = _model_words(hit.model)
+    for count, tok in enumerate(re.finditer(r"\S+", text[hit.end : window_end])):
+        word = tok.group(0)
+        if count >= _SUFFIX_WINDOW or word in _SUFFIX_WINDOW_STOP:
+            break
+        if word in changers and word not in consumed and not is_negated(text, hit.end + tok.start()):
+            return word
+    return None
+
+
 def find_model_hits(text: str) -> list[ModelHit]:
     """All non-overlapping model-family hits in normalized ``text``, ordered by position."""
     raw_hits: list[tuple[int, int, ModelHit]] = []
@@ -1645,6 +1843,12 @@ def find_model_hits(text: str) -> list[ModelHit]:
             continue  # overlaps an earlier (or same-position, higher-priority) hit
         hits.append(hit)
         last_end = hit.end
+    for i, hit in enumerate(hits):
+        window_end = hits[i + 1].start if i + 1 < len(hits) else len(text)
+        word = _unconsumed_suffix(hit, text, window_end)
+        if word:
+            note = f"'{word}' after {hit.model} does not belong to that model name: exact model ambiguous"
+            hits[i] = replace(hit, model=None, notes=(*hit.notes, note))
     return hits
 
 
@@ -1680,7 +1884,44 @@ IDENTITY_LABELS: dict[str, str] = {
     "lens": "lens kit",
     "power": "battery kit",
     "size": "size",
+    "material": "case material",
 }
+
+#: Apple Watch case materials sold as separate, more expensive products than the aluminium case.  An
+#: unstated material and "aluminio" both mean "no premium material stated" (no key dimension).
+PREMIUM_WATCH_MATERIALS: frozenset[str] = frozenset({"steel", "titanium", "hermes"})
+
+
+def has_material_dimension(model: str | None) -> bool:
+    """Apple Watch Series models come in aluminium and stainless steel/titanium/Hermes cases."""
+    return bool(model) and str(model).startswith("apple watch series")
+
+
+def material_conflict(model: str | None, tokens: list[str] | tuple[str, ...]) -> bool:
+    """True when the title states contradictory case materials (aluminium and steel, steel and titanium)."""
+    if not has_material_dimension(model):
+        return False
+    premium = PREMIUM_WATCH_MATERIALS & set(tokens)
+    return len(premium) > 1 or (len(premium) == 1 and "aluminum" in tokens)
+
+
+def requires_screen(model: str | None) -> bool:
+    """Lines sold in several screen sizes at different prices: the size must be stated to cluster.
+
+    iPad Pro (every generation), iPad Air M2 and later (11"/13"), MacBook Air M2 and later (13"/15") and
+    MacBook Pro with an M-series Pro/Max chip (14"/16").  Base M1/M2 MacBook Pros (13" only), base
+    M3/M4 MacBook Pros (14" only) and the M1 MacBook Air (13" only) come in one size.
+    """
+    if not model:
+        return False
+    model = str(model)
+    return bool(
+        model.startswith("ipad pro")
+        or re.fullmatch(r"ipad air m[2-9]", model)
+        or re.fullmatch(r"macbook air m[2-9]", model)
+        or re.fullmatch(r"macbook pro m\d (?:pro|max)", model)
+    )
+
 
 _INCH_TOKEN = re.compile(r"\d{1,2}in")
 _MM_TOKEN = re.compile(r"\d{2}mm")
@@ -1718,6 +1959,9 @@ def identity_dims(
         mms = sorted(t for t in toks if _MM_TOKEN.fullmatch(t))
         if len(mms) == 1:
             dims["case_size"] = mms[0]
+        premium = sorted(PREMIUM_WATCH_MATERIALS & toks)
+        if has_material_dimension(model) and len(premium) == 1 and "aluminum" not in toks:
+            dims["material"] = premium[0]
     if category == "laptop":
         if ram_gb:
             dims["ram"] = f"ram{ram_gb}gb"

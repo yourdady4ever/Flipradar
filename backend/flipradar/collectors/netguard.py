@@ -6,7 +6,8 @@ Used for every request whose URL comes from a *user* (the single-URL JSON-LD che
 * the hostname is resolved and EVERY address must be public (no private, loopback, link-local,
   multicast, reserved, unspecified, CGNAT, site-local, or IPv4-embedded-in-IPv6 private addresses);
 * redirects are followed manually (max 3) and each hop is re-validated;
-* bodies are streamed and capped (2 MB by default) and the content type can be restricted;
+* bodies are streamed and capped (2 MB by default, measured AFTER decompression, which is done here with
+  bounded output; only one gzip/deflate layer is accepted) and the content type can be restricted;
 * :class:`GuardedTransport` repeats the address check at *connect time* and connects to the vetted IP,
   which defeats DNS-rebinding between the pre-check and the real connection.
 
@@ -22,9 +23,11 @@ import email.utils
 import ipaddress
 import logging
 import socket
+import zlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import httpcore
 import httpx
@@ -39,6 +42,8 @@ MAX_REDIRECTS = 3
 DEFAULT_ALLOWED_PORTS = frozenset({80, 443})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 MAX_RETRY_AFTER_SECONDS = 60.0
+#: The only content codings :func:`read_capped` decodes; send it with every capped request.
+ACCEPT_ENCODING = "gzip, deflate"
 
 IPAddress = ipaddress.IPv4Address | ipaddress.IPv6Address
 
@@ -108,16 +113,68 @@ async def http_client(
         await own.aclose()
 
 
+def _content_decoder(response: httpx.Response) -> Any:
+    """zlib decompressor for the response's ``Content-Encoding`` (None for identity).
+
+    Only ONE gzip/deflate layer is accepted: stacked encodings ("gzip, gzip") multiply the compression
+    ratio and br/zstd are not requested (see :data:`ACCEPT_ENCODING`)."""
+    header = response.headers.get("content-encoding", "")
+    codings = [c.strip().lower() for c in header.split(",") if c.strip() and c.strip().lower() != "identity"]
+    if not codings:
+        return None
+    if len(codings) > 1:
+        raise CollectorError(f"stacked content encoding '{header}' is not supported")
+    if codings[0] in ("gzip", "x-gzip"):
+        return zlib.decompressobj(zlib.MAX_WBITS | 16)
+    if codings[0] == "deflate":
+        return zlib.decompressobj(zlib.MAX_WBITS)  # zlib-wrapped; raw deflate is handled in read_capped
+    raise CollectorError(f"unsupported content encoding '{codings[0]}'")
+
+
 async def read_capped(response: httpx.Response, max_bytes: int = MAX_BODY_BYTES) -> bytes:
-    """Read a *streamed* response body, aborting as soon as it exceeds ``max_bytes`` (decoded size)."""
+    """Read a *streamed* response body, aborting as soon as it exceeds ``max_bytes`` (decoded size).
+
+    The body is read raw and decompressed here with a bounded output size per call, so a small
+    compressed "bomb" can never allocate more than ``max_bytes + 1`` decoded bytes."""
     declared = response.headers.get("content-length")
     if declared and declared.strip().isdigit() and int(declared) > max_bytes:
         raise ResponseTooLarge(f"response body is {int(declared)} bytes; the limit is {max_bytes} bytes")
+    decoder = _content_decoder(response)
+    raw_deflate_fallback = response.headers.get("content-encoding", "").strip().lower() == "deflate"
     buffer = bytearray()
-    async for chunk in response.aiter_bytes():
-        buffer.extend(chunk)
+    received = 0
+
+    def too_large() -> ResponseTooLarge:
+        return ResponseTooLarge(f"response body exceeds the {max_bytes} byte limit")
+
+    async for chunk in response.aiter_raw():
+        received += len(chunk)
+        if received > max_bytes:  # wire bytes, same rule as the Content-Length check above
+            raise too_large()
+        if decoder is None:
+            buffer.extend(chunk)
+            continue
+        data = chunk
+        while data and not decoder.eof:
+            try:
+                piece = decoder.decompress(data, max_bytes - len(buffer) + 1)
+            except zlib.error as exc:
+                if raw_deflate_fallback and not buffer and received == len(chunk):
+                    # some servers send raw deflate (no zlib header) for "deflate"
+                    raw_deflate_fallback = False
+                    decoder = zlib.decompressobj(-zlib.MAX_WBITS)
+                    continue
+                raise CollectorError(f"response body could not be decoded ({exc})") from exc
+            buffer.extend(piece)
+            if len(buffer) > max_bytes:
+                raise too_large()
+            data = decoder.unconsumed_tail
+            if not piece and data:  # pragma: no cover - zlib always makes progress while output fits
+                break
+    if decoder is not None:
+        buffer.extend(decoder.flush())
         if len(buffer) > max_bytes:
-            raise ResponseTooLarge(f"response body exceeds the {max_bytes} byte limit")
+            raise too_large()
     return bytes(buffer)
 
 
@@ -346,7 +403,7 @@ def build_guarded_client(
     return httpx.AsyncClient(
         transport=GuardedTransport(network_backend=network_backend),
         timeout=settings.http_timeout_seconds,
-        headers={"User-Agent": settings.user_agent},
+        headers={"User-Agent": settings.user_agent, "Accept-Encoding": ACCEPT_ENCODING},
         follow_redirects=False,
         trust_env=False,
     )
@@ -405,6 +462,7 @@ async def guarded_get(
     ``allowed_content_types`` is enforced only for 2xx responses.  ``before_redirect`` is awaited with
     each validated redirect target (e.g. to re-check robots.txt) and may raise to stop."""
     ports = tuple(allowed_ports or ())
+    headers = {**(headers or {}), "Accept-Encoding": ACCEPT_ENCODING}  # only what read_capped decodes
     current = await validate_url(url, allowed_ports=ports, host_policy=host_policy)
     allowed_types = {t.lower() for t in allowed_content_types} if allowed_content_types is not None else None
     redirects: list[str] = []

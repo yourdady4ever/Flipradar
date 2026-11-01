@@ -3,14 +3,20 @@
 Each sender returns a short status string recorded in ``Notification.delivery_json``:
 ``sent`` | ``not_configured`` | ``error: <reason>``.  Error reasons never include URLs or credentials
 (the Telegram URL embeds the bot token).  Nothing here raises.
+
+Secrets in URLs (the Telegram bot token, the webhook URL, the ntfy topic) are also kept out of the
+logs: httpx logs every request URL at INFO, so a filter on the ``httpx`` logger replaces every URL
+this module posts to with a redacted form before any handler sees the record.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterable
 from email.header import Header
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -21,16 +27,79 @@ log = logging.getLogger(__name__)
 
 TIMEOUT_SECONDS = 10.0
 CHANNELS = ("in_app", "ntfy", "telegram", "webhook")
+REDACTED = "***"
+# Characters that may stay as they are in a Click URL (RFC 3986 reserved + unreserved + existing escapes).
+_URL_SAFE = ":/?#[]@!$&'()*+,;=%-._~"
+
+
+class _SecretUrlFilter(logging.Filter):
+    """Replaces registered secret substrings in log records (installed on the ``httpx`` logger)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._secrets: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def register(self, secret: str | None, replacement: str) -> None:
+        if secret and len(secret) >= 4 and secret != replacement:
+            with self._lock:
+                self._secrets[secret] = replacement
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        with self._lock:
+            secrets = sorted(self._secrets.items(), key=lambda item: -len(item[0]))
+        if not secrets:
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - a broken record is not ours to fix
+            return True
+        redacted = message
+        for secret, replacement in secrets:
+            redacted = redacted.replace(secret, replacement)
+        if redacted != message:
+            record.msg, record.args = redacted, None
+        return True
+
+
+_LOG_REDACTOR = _SecretUrlFilter()
+logging.getLogger("httpx").addFilter(_LOG_REDACTOR)
+
+
+def _register_secret_url(url: str, redacted: str) -> None:
+    """Register ``url`` (as configured and as httpx prints it) so it never appears in logs."""
+    _LOG_REDACTOR.register(url, redacted)
+    try:
+        _LOG_REDACTOR.register(str(httpx.URL(url)), redacted)
+    except (httpx.InvalidURL, TypeError, ValueError):
+        pass
+
+
+def _origin(url: str) -> str:
+    try:
+        parsed = httpx.URL(url)
+        return f"{parsed.scheme}://{parsed.netloc.decode('ascii', 'replace')}" if parsed.host else REDACTED
+    except (httpx.InvalidURL, TypeError, ValueError):
+        return REDACTED
 
 
 def _header_value(value: str) -> str:
-    """HTTP header values must be ASCII; non-ASCII text is RFC 2047 encoded (ntfy decodes it)."""
+    """HTTP header values must be ASCII; non-ASCII text is RFC 2047 encoded (ntfy decodes it).
+
+    The value is kept on ONE line: ``Header.encode()`` folds long text into several encoded-words joined
+    by a line break, which is illegal in an HTTP header (h11 refuses to send the request).  The words are
+    re-joined with single spaces instead; RFC 2047 decoders ignore whitespace between encoded-words."""
     value = " ".join(value.split())
     try:
         value.encode("ascii")
         return value
     except UnicodeEncodeError:
-        return Header(value, "utf-8").encode()
+        return " ".join(Header(value, "utf-8").encode().split())
+
+
+def _url_header_value(url: str) -> str:
+    """A URL as an ASCII header value: non-ASCII characters percent-encoded (UTF-8), no whitespace."""
+    return quote("".join(url.split()), safe=_URL_SAFE)
 
 
 def _error(exc: Exception | None = None, status: int | None = None) -> str:
@@ -57,13 +126,15 @@ def send_ntfy(
 ) -> str:
     if not settings.ntfy_url or not settings.ntfy_topic:
         return "not_configured"
-    url = f"{settings.ntfy_url.rstrip('/')}/{settings.ntfy_topic.strip('/')}"
+    base = settings.ntfy_url.rstrip("/")
+    url = f"{base}/{settings.ntfy_topic.strip('/')}"
+    _register_secret_url(url, f"{base}/{REDACTED}")  # on ntfy.sh the topic name is the password
     headers = {"Title": _header_value(title[:250]), "Priority": priority}
     tag_list = [t for t in tags if t]
     if tag_list:
         headers["Tags"] = _header_value(",".join(tag_list))
     if click_url:
-        headers["Click"] = click_url
+        headers["Click"] = _url_header_value(click_url)
     if settings.ntfy_token:
         headers["Authorization"] = f"Bearer {settings.ntfy_token}"
     http, owned = _client(client, settings)
@@ -84,6 +155,8 @@ def send_telegram(text: str, settings: Settings, *, client: httpx.Client | None 
     if not settings.telegram_bot_token or not settings.telegram_chat_id:
         return "not_configured"
     url = f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage"
+    _register_secret_url(url, f"https://api.telegram.org/bot{REDACTED}/sendMessage")
+    _LOG_REDACTOR.register(settings.telegram_bot_token, REDACTED)
     payload = {"chat_id": settings.telegram_chat_id, "text": text[:4000], "disable_web_page_preview": True}
     http, owned = _client(client, settings)
     try:
@@ -102,6 +175,7 @@ def send_telegram(text: str, settings: Settings, *, client: httpx.Client | None 
 def send_webhook(payload: dict[str, Any], settings: Settings, *, client: httpx.Client | None = None) -> str:
     if not settings.webhook_url:
         return "not_configured"
+    _register_secret_url(settings.webhook_url, f"{_origin(settings.webhook_url)}/{REDACTED}")
     http, owned = _client(client, settings)
     try:
         response = http.post(settings.webhook_url, json=payload, timeout=TIMEOUT_SECONDS)

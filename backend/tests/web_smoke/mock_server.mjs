@@ -99,7 +99,9 @@ function createState() {
       { id: 1, rule_id: null, opportunity_id: null, kind: 'system', title: 'FIXTURE read notification', body: 'FIXTURE', created_at: daysAgo(2), read_at: daysAgo(1) },
     ],
     inventory: [],
-    settings: { min_comparables: 3, comparable_max_age_days: 30, default_fee_profile_key: 'fixture_profile', target_roi_bp: 2000, min_profit_cents: 20000, fx_usd_mxn_manual: null, include_demo_data: true, ai_provider: 'none', scheduler_enabled: false },
+    settings: { min_comparables: 3, comparable_max_age_days: 30, default_fee_profile_key: 'fixture_profile', default_fee_profile_key_used: 'fixture_profile', target_roi_bp: 2000, min_profit_cents: 20000, min_roi_bp: 1000, pricing_strategy: 'competitive', unknown_shipping_assumption_cents: null, fx_usd_mxn_manual: null, include_demo_data: true, ai_provider: 'none', scheduler_enabled: false },
+    // Shaped like a key-less public source, whose attribution must be displayed with the rate (FxOut.attribution).
+    fx: { base: 'USD', quote: 'MXN', rate: '18.4321', rate_date: '2026-01-01', source: 'fixture_fx', attribution: 'FIXTURE attribution: rates by Example FX (https://example.invalid/fx)' },
   };
 }
 
@@ -226,7 +228,8 @@ async function handleApi(st, req, res, url) {
     });
   }
   if (p === '/calculator/import-costs' && m === 'POST') {
-    return send(res, 200, { rule_key: body.rule_key, rule_name: 'FIXTURE courier rule', customs_value_usd_cents: body.item_value_usd_cents + (body.shipping_usd_cents || 0), usd_mxn_rate: body.usd_mxn_rate || '18.0000', fx_source: 'fixture', duty_rate_bp: 1700, duties_mxn_cents: 30600, customs_value_mxn_cents: 180000, notes: ['FIXTURE note'], source_url: 'https://example.invalid/rule', as_of: '2026-01-01' });
+    const fx = body.usd_mxn_rate ? { rate: body.usd_mxn_rate, source: 'provided' } : { rate: st.fx.rate, source: `${st.fx.source} (${st.fx.rate_date})` };
+    return send(res, 200, { rule_key: body.rule_key, rule_name: 'FIXTURE courier rule', customs_value_usd_cents: body.item_value_usd_cents + (body.shipping_usd_cents || 0), usd_mxn_rate: fx.rate, fx_source: fx.source, duty_rate_bp: 1700, duties_mxn_cents: 30600, customs_value_mxn_cents: 180000, notes: ['FIXTURE note'], source_url: 'https://example.invalid/rule', as_of: '2026-01-01' });
   }
   if (p === '/fee-profiles' && m === 'GET') return send(res, 200, st.profiles);
   if (p === '/fee-profiles' && m === 'POST') {
@@ -339,7 +342,7 @@ async function handleApi(st, req, res, url) {
     for (const [k, v] of Object.entries(body)) st.settings[k] = k === 'fx_usd_mxn_manual' && v === '' ? null : v;
     return send(res, 200, st.settings);
   }
-  if (p === '/fx/latest' && m === 'GET') return notFound(res, 'no FX rate stored');
+  if (p === '/fx/latest' && m === 'GET') return st.fx ? send(res, 200, st.fx) : notFound(res, 'no FX rate stored');
   return notFound(res, `mock: no route ${m} ${p}`);
 }
 

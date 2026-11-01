@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ...collectors import jsonld
+from ...collectors import jsonld, netguard
 from ...collectors.base import CollectorError
 from ...config import Settings
 from ...models import CollectionRun, Listing, Source
@@ -18,9 +19,16 @@ from ...services.ingestion import ingest_raw_listings
 from ...services.serialize import listing_out
 from ..deps import MAX_PAGE_SIZE, get_db, get_settings
 
+log = logging.getLogger(__name__)
 router = APIRouter(tags=["collection"])
 
 URL_CHECK_SOURCE = "web_jsonld"
+# Security refusals get one generic message: the specific reason can contain the address an internal
+# host name resolved to, which would turn this endpoint into a map of the owner's network.
+UNSAFE_URL_MESSAGE = (
+    "URL refused: it (or a redirect) points to a non-public or disallowed address. Only public http(s) "
+    "sites on allowed ports, without user:password@, can be checked."
+)
 
 
 @router.post("/collect", response_model=CollectResult)
@@ -52,6 +60,9 @@ async def check_url(body: UrlCheckIn, db: Session = Depends(get_db), settings: S
         result = await jsonld.check_url(url, settings)
     except NotImplementedError as exc:
         raise HTTPException(503, "URL check is not available yet") from exc
+    except netguard.UnsafeUrlError as exc:
+        log.info("check-url refused %s: %s", url[:200], exc)  # details stay in the server log
+        raise HTTPException(400, UNSAFE_URL_MESSAGE) from exc
     except CollectorError as exc:
         return UrlCheckOut(url=url, allowed_by_robots=False, found=False, message=str(exc)[:500])
     out = UrlCheckOut(

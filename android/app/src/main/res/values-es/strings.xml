@@ -25,6 +25,7 @@
     <string name="action_ai_summary">Resumen IA</string>
     <string name="any">Cualquiera</string>
     <string name="any_status">Cualquier estado</string>
+    <string name="opp_status_open">Abiertas (nueva, vista, en seguimiento, comprada)</string>
     <string name="none">Ninguno</string>
     <string name="notes">Notas</string>
     <string name="optional">Opcional</string>
@@ -41,6 +42,7 @@
     <string name="setup_token_label">Token de la API</string>
     <string name="setup_token_hint">Pega el token de la API</string>
     <string name="setup_token_hint_saved">Token guardado (déjalo vacío para conservarlo)</string>
+    <string name="setup_token_hint_other_server">Servidor distinto: pega su token (el token guardado solo se envía al servidor guardado)</string>
     <string name="setup_show_token">Mostrar token</string>
     <string name="setup_forget_token">Olvidar token guardado</string>
     <string name="setup_forget_token_confirm">¿Eliminar el token guardado de este dispositivo?</string>

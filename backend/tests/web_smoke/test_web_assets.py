@@ -134,7 +134,8 @@ _VIEW_CONTRACT: list[tuple[str, set[str]]] = [
     ("/api/v1/notifications?unread_only=false&limit=50", set()),
     ("/api/v1/notifications?unread_only=true&limit=50", set()),
     ("/api/v1/settings", {
-        "min_comparables", "comparable_max_age_days", "default_fee_profile_key", "target_roi_bp", "min_profit_cents",
+        "min_comparables", "comparable_max_age_days", "default_fee_profile_key", "default_fee_profile_key_used",
+        "target_roi_bp", "min_profit_cents", "min_roi_bp", "pricing_strategy", "unknown_shipping_assumption_cents",
         "fx_usd_mxn_manual", "include_demo_data", "ai_provider", "scheduler_enabled",
     }),
 ]

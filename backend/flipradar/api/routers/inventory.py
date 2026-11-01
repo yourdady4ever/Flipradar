@@ -58,6 +58,15 @@ def get_item(item_id: int, db: Session = Depends(get_db)) -> InventoryOut:
 
 @router.patch("/{item_id}", response_model=InventoryOut)
 def update_item(item_id: int, body: InventoryUpdate, db: Session = Depends(get_db)) -> InventoryOut:
+    """Edit an item (only the fields sent).
+
+    * ``409`` when ``unit_cost_cents`` / ``extra_costs_cents`` would change on an item that already has
+      sales: the sold units were costed with them.  Delete the sales first, or record a late cost on the
+      next sale as ``other_costs_cents``.
+    * ``status: written_off`` books the unsold units' remaining cost as a realized loss (analytics), dated
+      now; setting another status undoes it.  ``returned`` means refunded by the seller (no loss).
+    * ``title``, ``condition`` and the cost fields cannot be null (``422``).
+    """
     item = service.update_item(db, service.get_item(db, item_id), body)
     db.commit()
     return service.inventory_out(item)
@@ -72,6 +81,17 @@ def delete_item(item_id: int, db: Session = Depends(get_db)) -> Message:
 
 @router.post("/{item_id}/sales", response_model=SaleOut, status_code=status.HTTP_201_CREATED)
 def record_sale(item_id: int, body: SaleIn, db: Session = Depends(get_db)) -> SaleOut:
+    """Record a sale of ``quantity`` units (``409`` when fewer are available, also under concurrent requests).
+
+    * Fees: with ``fee_profile_key`` the calculator computes fees and withholdings per unit (times the
+      units); ``fees_cents`` / ``taxes_withheld_cents`` override them with the amounts actually charged.
+    * Shipping: ``shipping_cents`` is the total shipping you actually paid.  Mercado Libre profiles model
+      the seller's shipping charge as their per-unit fixed-fee tier, so a ``shipping_cents`` above 0
+      REPLACES that tier in the computed fees instead of being counted twice; leave it 0 to use the
+      profile's estimate.  For other profiles it is an additional cost.
+    * Cost basis: average cost, allocated cumulatively so the sales of an item add up exactly to its total
+      cost (the sale that empties the item takes the rounding remainder); see ``breakdown_json``.
+    """
     sale = service.record_sale(db, service.get_item(db, item_id), body)
     db.commit()
     return service.sale_out(sale)

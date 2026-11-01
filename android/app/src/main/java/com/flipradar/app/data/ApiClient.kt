@@ -1,6 +1,7 @@
 package com.flipradar.app.data
 
 import com.flipradar.app.AppInfo
+import com.flipradar.app.util.CancelSignal
 import com.flipradar.app.util.ServerUrl
 import org.json.JSONArray
 import org.json.JSONObject
@@ -31,9 +32,10 @@ class ApiException(
 /**
  * Minimal blocking HTTP client for the FLIP RADAR API (HttpURLConnection + org.json).
  *
- * All methods block: call them from a background thread (see util/Async.kt).  The bearer token is sent
- * only in the Authorization header and is never logged or placed in exception messages.  Redirects
- * are NOT followed so the token can never be forwarded to another host.
+ * All methods block: call them from a background thread (see util/Async.kt).  When the calling task is
+ * cancelled (util/CancelSignal.kt) the connection is disconnected, which aborts a blocked read.  The
+ * bearer token is sent only in the Authorization header and is never logged or placed in exception
+ * messages.  Redirects are NOT followed so the token can never be forwarded to another host.
  */
 class ApiClient(
     baseUrl: String,
@@ -68,7 +70,12 @@ class ApiClient(
         } catch (e: Exception) {
             throw ApiException(ApiException.Kind.NOT_CONFIGURED, "Invalid server URL", cause = e)
         }
+        // Thread.interrupt() cannot unblock a socket read; cancelling the task disconnects instead.
+        val cancel = CancelSignal.current()
         try {
+            if (cancel != null && !cancel.setAbort { conn.disconnect() }) {
+                throw ApiException(ApiException.Kind.NETWORK, "Request cancelled")
+            }
             setMethod(conn, method)
             conn.connectTimeout = connectTimeoutMs
             conn.readTimeout = readTimeout
@@ -121,6 +128,7 @@ class ApiClient(
         } catch (e: IOException) {
             throw ApiException(ApiException.Kind.NETWORK, "Network error: ${e.message ?: e.javaClass.simpleName}", cause = e)
         } finally {
+            cancel?.setAbort(null)
             conn.disconnect()
         }
     }

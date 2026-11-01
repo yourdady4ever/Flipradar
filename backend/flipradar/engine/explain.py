@@ -154,6 +154,7 @@ def build_facts(candidate: OpportunityCandidate, *, context: AnalysisContext | N
     selling_lines = _lines(profit.get("selling_lines", []))
     shipping_used = _line_amount(acquisition_lines, "buy_shipping")
     buy_price = _line_amount(acquisition_lines, "buy_price")
+    import_costs = _line_amount(acquisition_lines, "import_costs") or 0
     shipping_known = buy.shipping_mxn_cents is not None
 
     flags = [{"code": f.code, "severity": f.severity, "message": f.message} for f in candidate.risk_flags]
@@ -197,6 +198,8 @@ def build_facts(candidate: OpportunityCandidate, *, context: AnalysisContext | N
         caveats.append(
             f"Shipping to you is not reported by the source; {fmt_money(shipping_used)} was assumed."
         )
+    if buy.import_required and buy.import_note:
+        caveats.append(buy.import_note)
     if candidate.demand.level == "unknown":
         caveats.append("Demand is unknown because no sales evidence was observed; unknown is not the same as low.")
     if context:
@@ -215,6 +218,9 @@ def build_facts(candidate: OpportunityCandidate, *, context: AnalysisContext | N
         "buy_shipping_known": shipping_known,
         "buy_shipping_assumed": bool(context.shipping_assumed) if context else not shipping_known,
         **_money("buy_shipping", shipping_used),
+        "import_required": bool(buy.import_required),
+        **_money("import_costs", import_costs),
+        "import_note": buy.import_note if buy.import_required else None,
         **_money("buy_total", candidate.buy_total_cents),
         **_money("expected_sale", candidate.expected_sale_cents),
         "estimate_method": method,
@@ -299,8 +305,9 @@ def render_explanation(facts: dict[str, Any]) -> str:
     shipping = _get(facts, "buy_shipping")
     if not facts.get("buy_shipping_known"):
         shipping += " (not reported, assumed)"
+    duties = f" + import duties {_get(facts, 'import_costs')}" if facts.get("import_required") else ""
     out.append(
-        f"- Price {_get(facts, 'buy_price')} + shipping {shipping} = total {_get(facts, 'buy_total')}"
+        f"- Price {_get(facts, 'buy_price')} + shipping {shipping}{duties} = total {_get(facts, 'buy_total')}"
     )
     out.append("")
 

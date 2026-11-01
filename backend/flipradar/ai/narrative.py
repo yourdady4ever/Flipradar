@@ -1,10 +1,20 @@
 """Optional AI narrative: rephrase deterministic opportunity facts in plain Spanish.
 
 The AI never computes anything.  It receives the fact dictionary produced by the engine (every figure
-already calculated deterministically) and is asked to rephrase it.  The reply is then *validated*: every
-number in it must appear in the facts (allowing equivalent formats - ``12345.67``, ``12,345.67``,
-centavos/100, basis points/100, simple rounding).  A summary with any unknown number is rejected and
-never stored, so the model cannot introduce market statistics.
+already calculated deterministically) and is asked to rephrase it.  The reply is then *validated*:
+
+* every number in it must equal a **numeric** fact (or an engine-formatted display string of one), with
+  equivalent formats allowed - ``12345.67``, ``12,345.67``, centavos/100, basis points/100, ratio x 100,
+  simple rounding.  Free text inside the facts (listing titles, URLs, notes, risk messages, labels) is
+  third-party or prose and never whitelists a number, so a seller cannot plant figures in a title;
+* the sign must match: ``-$1,500.00``, or a number introduced by "pérdida"/"negativo", only matches a
+  negative fact, and a plain number only matches a non-negative one;
+* numbers that are part of the product's canonical identity (``iPhone 15 Pro``, ``256GB`` from the
+  vocabulary-derived ``product_key``) are names, not figures, and are ignored;
+* a summary that denies risks ("sin riesgos") is rejected when the facts list risk flags.
+
+A summary that fails any check is rejected and never stored, so the model cannot introduce market
+statistics or restate a seller's claims as facts.
 
 Providers (``FLIPRADAR_LLM_PROVIDER``): ``none`` (default), ``ollama`` (local, free) or
 ``openai_compatible`` (llama.cpp server, LM Studio, vLLM... or a paid API if you point it at one).
@@ -28,6 +38,18 @@ MAX_FACTS_CHARS = 12_000
 MAX_SUMMARY_CHARS = 2_000
 
 _NUMBER_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?")
+_MINUS_SIGNS = "-\u2212"
+# A number right after one of these words is a negative amount ("una pérdida de $1,500.00").
+_LOSS_RE = re.compile(
+    r"\b(?:p[eé]rdidas?|pierde[ns]?|perder[aá]?s?|perdiendo|negativ[oa]s?|loss(?:es)?|negative)\b", re.IGNORECASE
+)
+_RISK_DENIAL_RE = re.compile(
+    r"\b(?:sin|ning[uú]n|no\s+hay|no\s+tiene|no\s+presenta|cero|libre\s+de)\s+riesgos?\b"
+    r"|\bno\s+risks?\b|\brisk[- ]free\b|\bwithout\s+(?:any\s+)?risks?\b",
+    re.IGNORECASE,
+)
+# String facts whose numbers are engine-formatted renderings of numeric facts ("23.50%", "14.07").
+_FORMATTED_SUFFIXES = ("_pct", "_str")
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 SYSTEM_PROMPT = (
@@ -72,11 +94,12 @@ def extract_numbers(text: str) -> list[Decimal]:
 
 
 def _variants(value: Decimal, *, is_integer_fact: bool, is_ratio: bool) -> set[Decimal]:
-    out = {abs(value)}
+    """Accepted equivalent forms of a fact, with its sign kept (a loss never matches a gain)."""
+    out = {value}
     if is_integer_fact:
-        out.add(abs(value) / 100)  # centavos -> pesos, basis points -> percent
+        out.add(value / 100)  # centavos -> pesos, basis points -> percent
     if is_ratio:
-        out.add(abs(value) * 100)  # 0.235 -> 23.5 %
+        out.add(value * 100)  # 0.235 -> 23.5 %
     rounded: set[Decimal] = set()
     for v in out:
         for places in ("1", "0.1", "0.01"):
@@ -84,12 +107,60 @@ def _variants(value: Decimal, *, is_integer_fact: bool, is_ratio: bool) -> set[D
     return out | rounded
 
 
+def _is_identifier_key(key: str | None) -> bool:
+    """Database ids and the facts schema version are not figures a summary may cite."""
+    return key is not None and (key == "id" or key.endswith(("_id", "_ids")) or key == "facts_version")
+
+
+def _is_formatted_key(key: str | None, parent: dict[str, Any] | None) -> bool:
+    """Engine-formatted display strings: ``roi_pct``, ``score_str``, or ``net_profit`` next to
+    ``net_profit_cents`` (see ``engine.explain._money``)."""
+    if key is None:
+        return False
+    return key.endswith(_FORMATTED_SUFFIXES) or (parent is not None and f"{key}_cents" in parent)
+
+
+def _signed_numbers(text: str) -> list[tuple[str, Decimal]]:
+    """``(matched text, signed value)`` for every number in ``text``.
+
+    A number is negative when written with a minus sign (``-25%``, ``-$1,500.00``, ``$-1,500.00``) or when
+    a loss word ("pérdida", "negativo", "loss") appears between it and the previous number.  Hyphens
+    inside words, ranges and dates (``X-25``, ``1500-2500``, ``2026-01-15``) are not signs."""
+    out: list[tuple[str, Decimal]] = []
+    previous_end = 0
+    for match in _NUMBER_RE.finditer(text or ""):
+        value = _to_decimal(match.group(0))
+        if value is None:
+            continue
+        negative = _has_minus_sign(text, match.start()) or bool(_LOSS_RE.search(text, previous_end, match.start()))
+        out.append((match.group(0), -value if negative else value))
+        previous_end = match.end()
+    return out
+
+
+def _has_minus_sign(text: str, start: int) -> bool:
+    i = start - 1
+    if i >= 0 and text[i] == " ":
+        i -= 1
+    if i >= 0 and text[i] == "$":
+        i -= 1
+        if i >= 0 and text[i] == " ":
+            i -= 1
+    if i >= 0 and text[i] in _MINUS_SIGNS:
+        return i == 0 or not text[i - 1].isalnum()
+    return False
+
+
 def fact_numbers(facts: Any) -> set[Decimal]:
-    """Every number present in ``facts`` (recursively), with accepted equivalent forms."""
+    """Signed numbers a summary may cite, with accepted equivalent forms.
+
+    Only numeric fact values (int/float/Decimal) and engine-formatted display strings count.  Other
+    strings - listing titles and URLs written by sellers, notes, risk messages, labels, caveats - are
+    never mined for numbers, and database ids are skipped."""
     allowed: set[Decimal] = set()
 
-    def walk(value: Any) -> None:
-        if value is None or isinstance(value, bool):
+    def walk(value: Any, key: str | None = None, parent: dict[str, Any] | None = None) -> None:
+        if value is None or isinstance(value, bool) or _is_identifier_key(key):
             return
         if isinstance(value, int):
             allowed.update(_variants(Decimal(value), is_integer_fact=True, is_ratio=False))
@@ -99,32 +170,65 @@ def fact_numbers(facts: Any) -> set[Decimal]:
                 allowed.update(_variants(dec, is_integer_fact=dec == dec.to_integral_value(),
                                          is_ratio=abs(dec) <= 1))
         elif isinstance(value, str):
-            for number in extract_numbers(value):
-                allowed.update(_variants(number, is_integer_fact=False, is_ratio=False))
+            if _is_formatted_key(key, parent):
+                for _, number in _signed_numbers(value):
+                    allowed.update(_variants(number, is_integer_fact=False, is_ratio=False))
         elif isinstance(value, dict):
-            for item in value.values():  # keys are field names (e.g. "p25_cents"), not facts
-                walk(item)
+            for item_key, item in value.items():  # keys are field names (e.g. "p25_cents"), not facts
+                walk(item, str(item_key), value)
         elif isinstance(value, list | tuple | set):
             for item in value:
-                walk(item)
+                walk(item, key, parent)
 
     walk(facts)
     return allowed
 
 
+def _identity_patterns(facts: Any) -> list[re.Pattern[str]]:
+    """Patterns for the product's own name parts (``iphone 15 pro``, ``256gb``) from ``product_key``.
+
+    The canonical key is built from the normalizer's vocabulary (brand, model family, storage size), not
+    copied from listing text, so the numbers inside it are names that a summary may repeat."""
+    key = facts.get("product_key") if isinstance(facts, dict) else None
+    if not isinstance(key, str):
+        return []
+    patterns: list[re.Pattern[str]] = []
+    for segment in key.lower().split("|"):
+        tokens = re.findall(r"[a-z]+|[0-9]+", segment)
+        if not any(t.isdigit() for t in tokens) or not any(t.isalpha() for t in tokens):
+            continue
+        phrases = [tokens] + [tokens[i:i + 2] for i in range(len(tokens) - 1)
+                              if tokens[i].isdigit() != tokens[i + 1].isdigit()]
+        for phrase in phrases:
+            body = r"[\s\-]*".join(re.escape(t) for t in phrase)
+            patterns.append(re.compile(r"(?<![0-9a-z])" + body + r"(?![0-9a-z])", re.IGNORECASE))
+    return patterns
+
+
+def _mask_identity(summary: str, facts: Any) -> str:
+    for pattern in _identity_patterns(facts):
+        summary = pattern.sub(lambda m: " " * len(m.group(0)), summary)
+    return summary
+
+
 def unknown_numbers(summary: str, facts: Any) -> list[str]:
+    """Numbers in ``summary`` (as written) that do not match a trusted fact, sign included."""
     allowed = fact_numbers(facts)
-    unknown: list[str] = []
-    for match in _NUMBER_RE.finditer(summary or ""):
-        value = _to_decimal(match.group(0))
-        if value is None or abs(value) not in allowed:
-            unknown.append(match.group(0))
-    return unknown
+    return [text for text, value in _signed_numbers(_mask_identity(summary or "", facts)) if value not in allowed]
+
+
+def risk_denials(summary: str, facts: Any) -> list[str]:
+    """Phrases such as "sin riesgos" when the facts report a risk level other than ``none``."""
+    level = facts.get("risk_level") if isinstance(facts, dict) else None
+    if level in (None, "none"):
+        return []
+    return [" ".join(m.group(0).lower().split()) for m in _RISK_DENIAL_RE.finditer(summary or "")]
 
 
 def validate_summary(summary: str, facts: Any) -> tuple[bool, list[str]]:
-    unknown = unknown_numbers(summary, facts)
-    return (not unknown, unknown)
+    """``(ok, problems)``: problems are unknown numbers (as written) and risk-denying phrases."""
+    problems = unknown_numbers(summary, facts) + risk_denials(summary, facts)
+    return (not problems, problems)
 
 
 # ------------------------------------------------------------------------------------------------
@@ -216,13 +320,16 @@ async def summarize(
     summary = _clean(raw)
     if not summary:
         return None, False, provider, "AI returned an empty response"
-    ok, unknown = validate_summary(summary, facts)
-    if not ok:
-        shown = ", ".join(_dedupe(unknown)[:10])
-        return None, False, provider, (
-            "AI summary rejected and not stored: it contains numbers that are not in the deterministic "
-            f"facts ({shown})."
-        )
+    unknown = unknown_numbers(summary, facts)
+    denials = risk_denials(summary, facts)
+    if unknown or denials:
+        reasons = []
+        if unknown:
+            shown = ", ".join(_dedupe(unknown)[:10])
+            reasons.append(f"it contains numbers that are not in the deterministic facts ({shown})")
+        if denials:
+            reasons.append("it says there are no risks although the facts list risk flags")
+        return None, False, provider, "AI summary rejected and not stored: " + "; ".join(reasons) + "."
     return summary, True, provider, "Validated: every number in the summary appears in the deterministic facts."
 
 

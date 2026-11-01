@@ -3,6 +3,12 @@
 Each source gets a :class:`CollectionRun` row with status ``ok`` / ``skipped`` (disabled or not
 configured) / ``error`` (CollectorError, message stored on the run and on ``Source.last_error``).
 Sources are queried sequentially so per-source rate limits are respected.
+
+SQLite has ONE write lock, so no write transaction is ever open while a collector awaits the network: the
+run row is committed (status ``running``) before the collector is called, the collector itself touches no
+database state, and the results are ingested and the run finished in one short transaction afterwards.
+Every database step runs in a worker thread (``asyncio.to_thread``), so a step that has to wait for the
+lock never blocks the event loop that other requests and the scheduler share.
 """
 
 from __future__ import annotations
@@ -10,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from typing import Any
 
 import httpx
 from sqlalchemy import select
@@ -21,7 +28,7 @@ from ..config import Settings, get_settings
 from ..engine.types import RawListing
 from ..models import CollectionRun, Source, TrackedSearch
 from ..schemas import CollectionRunOut, CollectResult
-from . import analysis
+from . import analysis, bootstrap
 from .errors import NotFound
 from .ingestion import IngestStats, ingest_raw_listings
 from .timeutil import as_utc, utcnow
@@ -83,6 +90,100 @@ def _finish(run: CollectionRun, source: Source | None, status: str, message: str
         source.last_error = run.error if status == "error" else None
 
 
+def _open_run(session: Session, key: str, query: str, tracked_search_id: int | None) -> tuple[CollectionRun, Source | None]:
+    """Create and COMMIT the run row before any network I/O (unknown/disabled sources are finished at once)."""
+    source = session.scalars(select(Source).where(Source.key == key)).first()
+    run = CollectionRun(
+        source_id=source.id if source else None,
+        tracked_search_id=tracked_search_id,
+        query=query[:200],
+        started_at=utcnow(),
+        status="running",
+    )
+    session.add(run)
+    if source is None:
+        _finish(run, None, "error", f"unknown source '{key}'", utcnow())
+    elif not source.enabled:
+        _finish(run, source, "skipped", "source is disabled", utcnow())
+    session.commit()
+    return run, source
+
+
+async def _fetch(
+    key: str, query: str, limit: int, settings: Settings, client: httpx.AsyncClient | None
+) -> tuple[str, Any]:
+    """Network phase of one source - no database access.  Returns ``("ok", raws)`` or ``(status, message)``."""
+    collector: Collector | None = None
+    try:
+        collector = registry.get_collector(key, settings, client)
+        if not collector.is_configured():
+            return "skipped", "not configured: add the credentials described in the docs"
+        raws = await collector.search(query, limit=limit)
+        return "ok", list(raws)[: max(1, limit)]
+    except CollectorNotConfigured as exc:
+        return "skipped", f"not configured: {exc}"
+    except CollectorError as exc:
+        return "error", str(exc) or type(exc).__name__
+    except NotImplementedError:
+        return "error", "collector or pipeline component not implemented yet"
+    except Exception as exc:  # never let one source break the others
+        log.exception("collection from %s failed", key)
+        return "error", f"unexpected error: {type(exc).__name__}"
+    finally:
+        if collector is not None:
+            try:
+                await collector.aclose()
+            except Exception:  # pragma: no cover - defensive
+                log.warning("closing collector %s failed", key, exc_info=True)
+
+
+def _close_run(
+    session: Session, run: CollectionRun, source: Source | None, key: str, status: str, payload: Any,
+    settings: Settings,
+) -> set[int]:
+    """Database phase of one source (worker thread): ingest the fetched listings and finish the run, then commit.
+
+    Returns the product ids touched.  A refresh token rotated during the network phase is stored first,
+    in its own short transaction (see ``bootstrap.persist_rotated_ml_token``).
+    """
+    bootstrap.persist_rotated_ml_token()
+    touched: set[int] = set()
+    if status != "ok":
+        _finish(run, source, status, payload, utcnow())
+    else:
+        raws: list[RawListing] = payload
+        # Make a WRITE the first statement of this transaction: it waits for the write lock (busy_timeout)
+        # before ingestion reads anything.  A transaction that reads first cannot upgrade to a writer once
+        # another connection has committed (SQLite WAL answers SQLITE_BUSY at once, without waiting).
+        run.items_fetched = len(raws)
+        session.flush()
+        try:
+            stats = _ingest_atomic(session, key, raws, settings)
+        except NotImplementedError:
+            _finish(run, source, "error", "collector or pipeline component not implemented yet", utcnow())
+        except Exception as exc:  # never let one source break the others
+            log.exception("ingesting results from %s failed", key)
+            _finish(run, source, "error", f"unexpected error: {type(exc).__name__}", utcnow())
+        else:
+            run.items_new = stats.new
+            run.items_updated = stats.updated
+            touched = set(stats.product_ids_touched)
+            message = None
+            if stats.skipped:
+                message = f"{stats.skipped} item(s) skipped: " + "; ".join(stats.errors[:5])
+            _finish(run, source, "ok", message, utcnow())
+    session.commit()
+    return touched
+
+
+def _record_no_source(session: Session, query: str, tracked_search_id: int | None) -> CollectionRun:
+    run = CollectionRun(tracked_search_id=tracked_search_id, query=query[:200], started_at=utcnow(), status="running")
+    session.add(run)
+    _finish(run, None, "skipped", NO_SOURCE_MESSAGE, utcnow())
+    session.commit()
+    return run
+
+
 async def run_collection(
     session: Session,
     query: str,
@@ -94,73 +195,27 @@ async def run_collection(
     tracked_search_id: int | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> CollectResult:
-    """Search ``query`` on ``source_keys`` (empty/None = every searchable configured source).  Commits."""
+    """Search ``query`` on ``source_keys`` (empty/None = every searchable configured source).  Commits.
+
+    No write transaction is open while a collector awaits the network (see the module docstring).
+    """
     settings = settings or get_settings()
     query = (query or "").strip()
     keys = list(dict.fromkeys(source_keys or [])) or searchable_source_keys(session, settings)
-    runs: list[tuple[CollectionRun, str | None]] = []
-    touched: set[int] = set()
     if not keys:
         # Make "nothing happened" visible in the run history instead of silently doing nothing.
-        run = CollectionRun(tracked_search_id=tracked_search_id, query=query[:200], started_at=utcnow(), status="running")
-        session.add(run)
-        session.flush()
-        _finish(run, None, "skipped", NO_SOURCE_MESSAGE, utcnow())
-        session.commit()
+        run = await asyncio.to_thread(_record_no_source, session, query, tracked_search_id)
         return CollectResult(runs=[run_out(run, None)])
 
+    runs: list[tuple[CollectionRun, str | None]] = []
+    touched: set[int] = set()
     for key in keys:
-        source = session.scalars(select(Source).where(Source.key == key)).first()
-        run = CollectionRun(
-            source_id=source.id if source else None,
-            tracked_search_id=tracked_search_id,
-            query=query[:200],
-            started_at=utcnow(),
-            status="running",
-        )
-        session.add(run)
-        session.flush()
+        run, source = await asyncio.to_thread(_open_run, session, key, query, tracked_search_id)
         runs.append((run, key))
-        if source is None:
-            _finish(run, None, "error", f"unknown source '{key}'", utcnow())
+        if run.status != "running":  # unknown or disabled source: already finished and committed
             continue
-        if not source.enabled:
-            _finish(run, source, "skipped", "source is disabled", utcnow())
-            continue
-        collector: Collector | None = None
-        try:
-            collector = registry.get_collector(key, settings, client)
-            if not collector.is_configured():
-                _finish(run, source, "skipped", "not configured: add the credentials described in the docs", utcnow())
-                continue
-            raws = await collector.search(query, limit=limit)
-            raws = list(raws)[: max(1, limit)]
-            stats = await asyncio.to_thread(_ingest_atomic, session, key, raws, settings)
-            run.items_fetched = len(raws)
-            run.items_new = stats.new
-            run.items_updated = stats.updated
-            touched |= stats.product_ids_touched
-            message = None
-            if stats.skipped:
-                message = f"{stats.skipped} item(s) skipped: " + "; ".join(stats.errors[:5])
-            _finish(run, source, "ok", message, utcnow())
-        except CollectorNotConfigured as exc:
-            _finish(run, source, "skipped", f"not configured: {exc}", utcnow())
-        except CollectorError as exc:
-            _finish(run, source, "error", str(exc) or type(exc).__name__, utcnow())
-        except NotImplementedError:
-            _finish(run, source, "error", "collector or pipeline component not implemented yet", utcnow())
-        except Exception as exc:  # never let one source break the others
-            log.exception("collection from %s failed", key)
-            _finish(run, source, "error", f"unexpected error: {type(exc).__name__}", utcnow())
-        finally:
-            if collector is not None:
-                try:
-                    await collector.aclose()
-                except Exception:  # pragma: no cover - defensive
-                    log.warning("closing collector %s failed", key, exc_info=True)
-        session.flush()
-    session.commit()
+        status, payload = await _fetch(key, query, limit, settings, client)
+        touched |= await asyncio.to_thread(_close_run, session, run, source, key, status, payload, settings)
 
     result = CollectResult(runs=[run_out(r, k) for r, k in runs])
     if analyze and touched:
@@ -171,14 +226,19 @@ async def run_collection(
     return result
 
 
+def _mark_started(session: Session, search: TrackedSearch) -> None:
+    search.last_run_at = utcnow()
+    session.commit()
+
+
 async def run_tracked_search(
     session: Session, search_id: int, *, settings: Settings | None = None, client: httpx.AsyncClient | None = None
 ) -> CollectResult:
     search = session.get(TrackedSearch, search_id)
     if search is None:
         raise NotFound(f"tracked search {search_id} not found")
-    search.last_run_at = utcnow()
-    session.flush()
+    # Committed right away: never left open (holding the write lock) while the collectors run.
+    await asyncio.to_thread(_mark_started, session, search)
     return await run_collection(
         session,
         search.query,

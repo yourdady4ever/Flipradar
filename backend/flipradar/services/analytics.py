@@ -3,12 +3,22 @@
 Everything here is a deterministic aggregation of rows in the database; nothing is estimated.  Buckets
 are calendar periods in UTC.  Demo opportunities/listings are excluded unless ``include_demo_data``;
 opportunities with a critical risk flag (likely scam/replica) are never counted as open/potential profit.
+
+Realized profit = the sales' profit MINUS the cost of stock written off in the period (status
+``written_off``, dated ``written_off_at``): a write-off is a realized loss of the units' remaining cost.
+``avg_roi_bp`` divides by the cost of the units sold plus the cost written off.  A ``returned`` item is
+assumed refunded, so its cost leaves inventory without a loss.  Inventory cost is each open item's
+remaining cost (``total cost - cost already carried by its sales``), so sold + remaining == total cost.
+
+Timeseries: the window is extended back to the start of the first bucket, so every point covers its
+whole calendar period (the first one is never partial).  Totals can therefore include a few days more
+than ``/analytics/summary`` for the same ``days``.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
@@ -16,10 +26,19 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import Settings
-from ..models import CollectionRun, InventoryItem, Listing, Opportunity, OpportunityStatus, Sale, Source
+from ..models import (
+    CollectionRun,
+    InventoryItem,
+    InventoryStatus,
+    Listing,
+    Opportunity,
+    OpportunityStatus,
+    Sale,
+    Source,
+)
 from ..schemas import AnalyticsSummaryOut, TimeseriesOut, TimeseriesPoint
 from . import settings_store
-from .inventory import OPEN_STATUSES, total_cost_cents
+from .inventory import OPEN_STATUSES, remaining_cost_cents, total_cost_cents, written_off_cost_cents
 from .timeutil import as_utc, utcnow
 
 OPEN_OPPORTUNITY_STATUSES = (OpportunityStatus.NEW.value, OpportunityStatus.SEEN.value, OpportunityStatus.WATCHING.value)
@@ -40,6 +59,17 @@ def aging_bucket(days: int) -> str:
     return "90+"
 
 
+def _write_offs(session: Session, start: datetime, end: datetime) -> list[InventoryItem]:
+    """Items written off within [start, end] (with their sales loaded, for the remaining cost)."""
+    return list(session.scalars(
+        select(InventoryItem)
+        .options(selectinload(InventoryItem.sales))
+        .where(InventoryItem.status == InventoryStatus.WRITTEN_OFF.value, InventoryItem.written_off_at >= start,
+               InventoryItem.written_off_at <= end)
+        .order_by(InventoryItem.id)
+    ))
+
+
 def summary(session: Session, days: int = 30, now: datetime | None = None, settings: Settings | None = None) -> AnalyticsSummaryOut:
     now = as_utc(now or utcnow())
     start = now - timedelta(days=days)
@@ -48,10 +78,12 @@ def summary(session: Session, days: int = 30, now: datetime | None = None, setti
     sales = session.scalars(
         select(Sale).options(selectinload(Sale.item)).where(Sale.sold_at >= start, Sale.sold_at <= now).order_by(Sale.id)
     ).all()
+    write_offs = [(item, written_off_cost_cents(item)) for item in _write_offs(session, start, now)]
+    written_off = sum(cost for _, cost in write_offs)
     revenue = sum(s.unit_price_cents * s.quantity for s in sales)
-    profit = sum(s.profit_cents for s in sales)
+    profit = sum(s.profit_cents for s in sales) - written_off
     units = sum(s.quantity for s in sales)
-    basis = sum(s.cost_basis_cents for s in sales)
+    basis = sum(s.cost_basis_cents for s in sales) + written_off
     avg_roi = _half_up(Decimal(profit) * 10000 / Decimal(basis)) if basis > 0 else None
     held = [(as_utc(s.sold_at) - as_utc(s.item.purchased_at)).total_seconds() / 86400 for s in sales if s.item]
     avg_days = round(sum(max(0.0, h) for h in held) / len(held), 1) if held else None
@@ -66,10 +98,20 @@ def summary(session: Session, days: int = 30, now: datetime | None = None, setti
         )
         entry["profit_cents"] += s.profit_cents
         entry["units"] += s.quantity
+    for item, cost in write_offs:
+        if not cost:
+            continue
+        key = ("p", item.product_id) if item.product_id else ("t", item.title)
+        entry = by_product.setdefault(
+            key, {"product_id": item.product_id, "title": item.title, "profit_cents": 0, "units": 0}
+        )
+        entry["profit_cents"] -= cost
     top = sorted(by_product.values(), key=lambda e: (-e["profit_cents"], e["title"]))[:5]
 
     items = session.scalars(
-        select(InventoryItem).where(InventoryItem.status.in_(OPEN_STATUSES), InventoryItem.quantity_available > 0)
+        select(InventoryItem)
+        .options(selectinload(InventoryItem.sales))
+        .where(InventoryItem.status.in_(OPEN_STATUSES), InventoryItem.quantity_available > 0)
     ).all()
     aging = dict.fromkeys(AGING_BUCKETS, 0)
     inventory_units = inventory_cost = 0
@@ -77,7 +119,7 @@ def summary(session: Session, days: int = 30, now: datetime | None = None, setti
     for item in items:
         qa = int(item.quantity_available)
         inventory_units += qa
-        inventory_cost += _half_up(Decimal(total_cost_cents(item)) * qa / Decimal(max(1, item.quantity)))
+        inventory_cost += remaining_cost_cents(item)
         if item.target_sale_cents is not None:
             target_value = (target_value or 0) + int(item.target_sale_cents) * qa
         aging[aging_bucket(max(0, (now - as_utc(item.purchased_at)).days))] += qa
@@ -147,8 +189,8 @@ def _next(day: date, bucket: Bucket) -> date:
 
 def timeseries(session: Session, days: int = 90, bucket: Bucket = "week", now: datetime | None = None) -> TimeseriesOut:
     now = as_utc(now or utcnow())
-    start = now - timedelta(days=days)
-    first = bucket_start(start.date(), bucket)
+    first = bucket_start((now - timedelta(days=days)).date(), bucket)
+    start = datetime.combine(first, time.min, tzinfo=UTC)  # whole first period, never a partial bucket
     last = bucket_start(now.date(), bucket)
     points: dict[date, dict[str, int]] = {}
     cursor = first
@@ -168,6 +210,10 @@ def timeseries(session: Session, days: int = 90, bucket: Bucket = "week", now: d
         key = bucket_start(as_utc(item.purchased_at).date(), bucket)
         if key in points:
             points[key]["purchases_cents"] += total_cost_cents(item)
+    for item in _write_offs(session, start, now):
+        key = bucket_start(as_utc(item.written_off_at).date(), bucket)
+        if key in points:
+            points[key]["profit_cents"] -= written_off_cost_cents(item)
 
     return TimeseriesOut(
         bucket=bucket,

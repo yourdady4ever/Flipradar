@@ -87,17 +87,49 @@ def _confidence(value: Decimal) -> float:
 # ------------------------------------------------------------------------------------------------
 
 
+#: Segment of keys created before storage became mandatory; such clusters mix every capacity.
+LEGACY_STORAGE_UNKNOWN = "storage:unknown"
+
+
+def missing_identity(attrs: NormalizedAttributes) -> list[str]:
+    """Why a (device) listing does not pin down ONE sellable product, i.e. which price-relevant
+    attribute is missing or contradictory.  Empty list = the listing can join a price cluster.
+
+    * storage, for categories where it changes the price (phone, tablet, console, handheld_pc,
+      laptop) unless the model ships in a single configuration (e.g. Switch OLED);
+    * the edition (digital/disc) of consoles sold both ways (PS5, PS5 Slim, Xbox Series X);
+    * the screen size of lines sold in several sizes (iPad Pro, iPad Air M2+, MacBook Air M2+,
+      MacBook Pro with a Pro/Max chip);
+    * a coherent case material (Apple Watch Series: aluminium vs steel/titanium/Hermes).
+    """
+    model = _norm(attrs.model)
+    reasons: list[str] = []
+    if _storage_relevant(attrs.category, model) and not attrs.storage_gb:
+        reasons.append("storage not stated (different capacities are different products)")
+    dims = _dims(attrs)
+    if model in V.EDITION_MODELS and "edition" not in dims:
+        reasons.append("edition (digital or disc) not stated")
+    if V.requires_screen(model) and "screen" not in dims:
+        reasons.append("screen size not stated (this line is sold in several sizes)")
+    if V.material_conflict(model, attrs.variant_tokens or []):
+        reasons.append("contradictory case materials in the title")
+    return reasons
+
+
 def canonical_key(attrs: NormalizedAttributes) -> str | None:
     """Stable cluster key (e.g. 'apple|iphone 15 pro|256gb'), or None if attributes are insufficient.
 
-    Format: ``brand|model[|<storage>gb][|<identity values, sorted, comma-joined>][|storage:unknown]``
+    Format: ``brand|model[|<storage>gb][|<identity values, sorted, comma-joined>]``
 
     * ``None`` when brand or model is unknown.
+    * ``None`` when a price-relevant attribute is missing (:func:`missing_identity`): a cluster of
+      "iPhone 15 Pro, any capacity" or "PS5 Slim, digital or disc" would price one product against
+      another, so such listings never join a price cluster (precision first).
     * Storage is part of the key for categories where it changes the price (phone, tablet, console,
-      handheld_pc, laptop) unless the model ships in a single configuration (e.g. Switch OLED).  When
-      it is missing the key ends in ``|storage:unknown`` so it never merges with a known-storage key.
+      handheld_pc, laptop) unless the model ships in a single configuration (e.g. Switch OLED).
     * Identity values are the attributes that make a different product: PS5 ``digital``/``disc``,
-      tablet ``wifi``/``cellular``, ``11in`` screens, ``45mm`` watch cases, laptop ``ram16gb``...
+      tablet ``wifi``/``cellular``, ``11in`` screens, ``45mm`` watch cases, laptop ``ram16gb``,
+      Apple Watch ``steel``/``titanium``/``hermes`` cases...
     * Accessories only get a key (prefixed ``acc|``) when the identified model *is* the accessory
       (e.g. ``acc|sony|dualsense``); a "funda para iPhone 15" identifies the phone, not the case, so it
       gets ``None`` and never mixes with devices or with other accessories.
@@ -112,15 +144,14 @@ def canonical_key(attrs: NormalizedAttributes) -> str | None:
         if expected is None or acc_type not in (None, expected):
             return None
         return f"acc|{brand}|{model}"
+    if missing_identity(attrs):
+        return None
     parts = [brand, model]
-    relevant = _storage_relevant(attrs.category, model)
-    if relevant and attrs.storage_gb:
+    if _storage_relevant(attrs.category, model) and attrs.storage_gb:
         parts.append(f"{attrs.storage_gb}gb")
     dims = _dims(attrs)
     if dims:
         parts.append(",".join(sorted(dims.values())))
-    if relevant and not attrs.storage_gb:
-        parts.append("storage:unknown")
     return "|".join(parts)
 
 
@@ -157,6 +188,10 @@ def hard_conflicts(a: NormalizedAttributes, b: NormalizedAttributes) -> list[str
     for dim in sorted(set(dims_a) & set(dims_b)):
         if dims_a[dim] != dims_b[dim]:
             reasons.append(f"{V.IDENTITY_LABELS.get(dim, dim)} differs ({dims_a[dim]} vs {dims_b[dim]})")
+    for x, y, dims_x in ((a, b, dims_a), (b, a, dims_b)):
+        # an explicitly aluminium Apple Watch is never the steel/titanium/Hermes one
+        if "material" in dims_x and "material" not in _dims(y) and "aluminum" in (y.variant_tokens or []):
+            reasons.append(f"{V.IDENTITY_LABELS['material']} differs ({dims_x['material']} vs aluminum)")
     return reasons
 
 
@@ -250,7 +285,7 @@ def _attrs_from_candidate(c: ProductCandidate) -> NormalizedAttributes:
     storage = stored.get("storage_gb")
     key_tokens: list[str] = []
     for segment in body[2:]:
-        if segment == "storage:unknown":
+        if segment == LEGACY_STORAGE_UNKNOWN:
             continue
         m = _STORAGE_SEGMENT.fullmatch(segment)
         if m:
@@ -283,6 +318,17 @@ def _attrs_from_candidate(c: ProductCandidate) -> NormalizedAttributes:
     )
 
 
+def _less_specific(product: NormalizedAttributes, listing: NormalizedAttributes) -> list[str]:
+    """Price-relevant attributes the listing states but the existing product does not."""
+    missing: list[str] = []
+    if _storage_relevant(listing.category or product.category, _norm(listing.model) or _norm(product.model)):
+        if listing.storage_gb and not product.storage_gb:
+            missing.append("storage")
+    product_dims = _dims(product)
+    missing.extend(V.IDENTITY_LABELS.get(dim, dim) for dim in sorted(set(_dims(listing)) - set(product_dims)))
+    return missing
+
+
 def _why_unclustered(attrs: NormalizedAttributes) -> list[str]:
     reasons: list[str] = []
     if not _norm(attrs.brand):
@@ -294,6 +340,8 @@ def _why_unclustered(attrs: NormalizedAttributes) -> list[str]:
             f"accessory ({_accessory_type(attrs) or 'unknown type'}) for {attrs.model}: the accessory itself "
             "is not identifiable"
         )
+    elif _norm(attrs.brand) and _norm(attrs.model):
+        reasons.extend(missing_identity(attrs))
     return reasons or ["insufficient attributes to cluster safely"]
 
 
@@ -315,10 +363,17 @@ class ProductMatcher:
         return len(self._by_key)
 
     def add(self, candidate: ProductCandidate) -> None:
-        """Index an existing cluster.  The first candidate registered for a key/GTIN wins."""
+        """Index an existing cluster.  The first candidate registered for a key/GTIN wins.
+
+        Clusters that no longer pin down one product (legacy ``|storage:unknown`` keys, PS5 keys
+        without an edition, multi-size lines without a screen size...) are not indexed: nothing new is
+        matched into them, neither by key nor by GTIN.
+        """
         if not candidate.key or candidate.key in self._by_key:
             return
         attrs = _attrs_from_candidate(candidate)
+        if LEGACY_STORAGE_UNKNOWN in candidate.key.split("|") or (not attrs.is_accessory and missing_identity(attrs)):
+            return
         self._by_key[candidate.key] = candidate
         self._attrs[candidate.key] = attrs
         gtin = normalize_gtin(candidate.gtin)
@@ -340,9 +395,11 @@ class ProductMatcher:
         if gtin and gtin in self._by_gtin:
             key = self._by_gtin[gtin]
             conflicts = hard_conflicts(attrs, self._attrs[key])
-            if not conflicts:
+            vaguer = _less_specific(self._attrs[key], attrs)
+            if not conflicts and not vaguer:
                 return MatchResult(key, GTIN_CONFIDENCE, "gtin", [f"GTIN {gtin} matches existing product '{key}'"])
-            reasons.append(f"GTIN {gtin} matches product '{key}' but was ignored: {'; '.join(conflicts)}")
+            why = conflicts or [f"the product does not state {', '.join(vaguer)} while this listing does"]
+            reasons.append(f"GTIN {gtin} matches product '{key}' but was ignored: {'; '.join(why)}")
 
         own_key = attrs.canonical_key
         if own_key and own_key in self._by_key:

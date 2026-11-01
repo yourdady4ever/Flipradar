@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.flipradar.app.util.ServerUrl
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -28,12 +29,16 @@ class Settings(context: Context) {
         private const val KEY_TOKEN_IV = "token_iv"
         private const val KEY_POLL_MINUTES = "poll_interval_minutes"
         private const val KEY_LAST_SEEN_NOTIFICATION = "last_seen_notification_id"
+        private const val KEY_LAST_SEEN_NOTIFICATION_AT = "last_seen_notification_created_at"
         private const val KEY_NOTIF_PERMISSION_ASKED = "notification_permission_asked"
 
         private const val KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "flipradar_api_token_key"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
+
+        /** Serialises read-modify-write updates (poll job thread vs. UI thread). */
+        private val LOCK = Any()
 
         /** Decrypted token cached in memory for this process (avoids a Keystore operation per request). */
         @Volatile
@@ -44,11 +49,27 @@ class Settings(context: Context) {
         val POLL_CHOICES = listOf(0, 15, 30, 60, 180, 720)
     }
 
-    var serverUrl: String?
+    /** Normalised server base URL; change it with [changeServer]. */
+    val serverUrl: String?
         get() = prefs.getString(KEY_SERVER_URL, null)
-        set(value) {
-            prefs.edit().putString(KEY_SERVER_URL, value).apply()
+
+    /**
+     * Saves the server base URL.  The API token and the notification cursor belong to one server, so when
+     * [url] is a different server (anything but the same normalised URL) both are dropped: the old token
+     * is never sent to the new server, and the old server's notification ids never hide the new one's.
+     * Returns true when the server changed.
+     */
+    fun changeServer(url: String): Boolean = synchronized(LOCK) {
+        val changed = !ServerUrl.sameServer(serverUrl, url)
+        val edit = prefs.edit().putString(KEY_SERVER_URL, url)
+        if (changed) {
+            cachedToken = null
+            edit.remove(KEY_TOKEN_CT).remove(KEY_TOKEN_IV)
+                .remove(KEY_LAST_SEEN_NOTIFICATION).remove(KEY_LAST_SEEN_NOTIFICATION_AT)
         }
+        edit.apply()
+        changed
+    }
 
     var pollIntervalMinutes: Int
         get() = prefs.getInt(KEY_POLL_MINUTES, DEFAULT_POLL_MINUTES)
@@ -56,11 +77,21 @@ class Settings(context: Context) {
             prefs.edit().putInt(KEY_POLL_MINUTES, value).apply()
         }
 
-    var lastSeenNotificationId: Long
-        get() = prefs.getLong(KEY_LAST_SEEN_NOTIFICATION, 0L)
-        set(value) {
-            prefs.edit().putLong(KEY_LAST_SEEN_NOTIFICATION, value).apply()
+    /** The newest notification already shown (posted by the poll job or listed in the app). */
+    val notificationCursor: NotificationCursor
+        get() = NotificationCursor(prefs.getLong(KEY_LAST_SEEN_NOTIFICATION, 0L), prefs.getString(KEY_LAST_SEEN_NOTIFICATION_AT, null))
+
+    /** Moves [notificationCursor] to the newest of [items]; never backwards, even when the poll job and the UI race. */
+    fun advanceNotificationCursor(items: List<NotificationOut>) = synchronized(LOCK) {
+        val current = notificationCursor
+        val next = current.advancedTo(items)
+        if (next != current) {
+            prefs.edit()
+                .putLong(KEY_LAST_SEEN_NOTIFICATION, next.id)
+                .putString(KEY_LAST_SEEN_NOTIFICATION_AT, next.createdAt)
+                .apply()
         }
+    }
 
     var notificationPermissionAsked: Boolean
         get() = prefs.getBoolean(KEY_NOTIF_PERMISSION_ASKED, false)

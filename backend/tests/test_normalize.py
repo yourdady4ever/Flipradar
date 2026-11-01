@@ -359,7 +359,7 @@ CASES = [
     ("iPhone 13 128gb Usado Bateria 85%", None, "apple", "iphone 13", 128, "used", False, False,
      "apple|iphone 13|128gb"),
     ("iPhone 14 Pro para piezas no enciende", None, "apple", "iphone 14 pro", None, "for_parts", False, False,
-     "apple|iphone 14 pro|storage:unknown"),
+     None),  # storage not stated: never a price cluster
     ("Samsung Galaxy S24 Ultra 12gb 512gb Titanium Gray", None, "samsung", "galaxy s24 ultra", 512, "unknown",
      False, False, "samsung|galaxy s24 ultra|512gb"),
     ("Samsung Galaxy S24+ 256GB Violeta", None, "samsung", "galaxy s24+", 256, "unknown", False, False,
@@ -395,7 +395,7 @@ CASES = [
     ("PS5 Slim Digital 1TB Seminuevo Caja Abierta", None, "sony", "ps5 slim", 1024, "used", False, False,
      "sony|ps5 slim|1024gb|digital"),
     ("PS5 Slim + 2 controles + 3 juegos", None, "sony", "ps5 slim", None, "unknown", False, True,
-     "sony|ps5 slim|storage:unknown"),
+     None),  # neither storage nor edition stated
     ("Control DualSense PS5 Blanco", None, "sony", "dualsense", None, "unknown", True, False, "acc|sony|dualsense"),
     ("Xbox Series S 512GB Blanco", None, "microsoft", "xbox series s", 512, "unknown", False, False,
      "microsoft|xbox series s|512gb"),

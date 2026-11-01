@@ -1,5 +1,6 @@
 """Purchase -> sale -> profit -> analytics, plus sale deletion and validation."""
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 
 from flipradar.finance.calculator import FeeModel, ProfitInputs, calculate_profit
@@ -33,12 +34,15 @@ def test_purchase_sale_profit_and_analytics(api):
         "channel": "mercadolibre"})
     assert r.status_code == 201, r.text
     sale = r.json()
-    per_unit = calculate_profit(ProfitInputs(buy_price_cents=810_000, sale_price_cents=1_100_000, fee=ML,
+    # The shipping actually paid (15,000) replaces the profile's per-unit shipping tier (6,550): it is not
+    # added on top of it (Mercado Libre models the seller's shipping charge as the fixed-fee tier).
+    per_unit = calculate_profit(ProfitInputs(buy_price_cents=810_000, sale_price_cents=1_100_000,
+                                             fee=dataclasses.replace(ML, fixed_fee_tiers=()),
                                              seller_shipping_override_cents=0))
     lines = {line.key: line.amount_cents for line in per_unit.selling_lines}
-    fees = lines["commission"] + lines["fixed_fee"] + lines["payment_fee"] + lines["iva_on_fees"]
+    fees = lines["commission"] + lines.get("fixed_fee", 0) + lines["payment_fee"] + lines["iva_on_fees"]
     taxes = lines["isr_withheld"] + lines["iva_withheld"]
-    assert sale["fees_cents"] == fees == 165_000 + 6_550
+    assert sale["fees_cents"] == fees == 165_000
     assert sale["taxes_withheld_cents"] == taxes
     assert sale["cost_basis_cents"] == 810_000
     assert sale["net_proceeds_cents"] == 1_100_000 - fees - 15_000 - taxes

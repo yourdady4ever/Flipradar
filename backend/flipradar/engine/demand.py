@@ -84,7 +84,9 @@ def estimate_demand(listings: list[ListingView], observations: Observations, *, 
     Levels: units/day >= 1 -> high, >= 0.2 -> medium, else low (the larger of the two evidence rates is
     used so the same sales are never double counted).  Confidence for (a): high with >= 5 listings and
     a span >= 14 days, medium with >= 2 listings or a span >= 7 days, else low; (b) alone is at most
-    medium (>= 2 sold listings).  Signals: ``{name, value, unit, source, note}``.
+    medium (>= 2 sold listings).  The reported confidence is that of the stream whose rate set the level;
+    the other stream raises it only when its own rate gives the same level.
+    Signals: ``{name, value, unit, source, note}``.
     """
     window = timedelta(days=WINDOW_DAYS)
     ordered = sorted(listings, key=lambda item: item.id)
@@ -206,9 +208,16 @@ def estimate_demand(listings: list[ListingView], observations: Observations, *, 
 
     rate = max(rates)
     level = _level(rate)
-    confidences = [c for c in (confidence_a, confidence_b) if c is not None]
+    from_a = rate_a is not None and rate == rate_a
+    # Confidence belongs to the evidence that set the level; the other stream can only raise it when it
+    # points to the same level on its own.
+    confidences = [
+        conf
+        for stream_rate, conf, selected in ((rate_a, confidence_a, from_a), (rate_b, confidence_b, not from_a))
+        if conf is not None and stream_rate is not None and (selected or _level(stream_rate) == level)
+    ]
     confidence: ConfidenceLevel = max(confidences, key=lambda c: _CONFIDENCE_RANK[c])
-    basis = "sold_quantity changes" if rate_a is not None and rate == rate_a else "listings reported as sold"
+    basis = "sold_quantity changes" if from_a else "listings reported as sold"
     note = (
         f"Estimated {_q4(rate)} units/day from {basis} in the last {WINDOW_DAYS} days "
         f"(high at {HIGH_RATE} or more, medium at {MEDIUM_RATE} or more)."

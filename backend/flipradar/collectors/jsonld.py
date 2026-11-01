@@ -232,7 +232,7 @@ def extract_jsonld_blocks(html: str) -> list[Any]:
             continue
         try:
             parsed.append(json.loads(text, strict=False))
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: hostile, absurdly deep nesting
             log.debug("skipping malformed JSON-LD block (%d chars)", len(text))
     return parsed
 
@@ -282,10 +282,15 @@ def _first_text(value: Any) -> str | None:
 
 _PLAIN_NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
 _THOUSANDS_COMMA = re.compile(r"^\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
+# "12.999" / "1.299": the dot is the thousands separator in es-MX/es-ES store templates, or a decimal
+# mark with an impossible third centavo digit -> ambiguous (rss.py rejects the same form).
+_DOT_THOUSANDS = re.compile(r"^\d{1,3}\.\d{3}$")
+#: Larger amounts are not a product price (and would overflow Decimal quantize / SQLite INTEGER).
+MAX_PRICE = Decimal(10) ** 9
 
 
 def parse_price_value(value: Any) -> Decimal | None:
-    """schema.org prices: number or string with '.' decimals.  Ambiguous formats return None."""
+    """schema.org prices: number or string with '.' decimals.  Ambiguous or absurd values return None."""
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -294,7 +299,7 @@ def parse_price_value(value: Any) -> Decimal | None:
         text = value.strip().replace("$", "").replace("MXN", "").replace(" ", "").strip()
         if _THOUSANDS_COMMA.match(text):
             text = text.replace(",", "")
-        elif not _PLAIN_NUMBER.match(text):
+        elif not _PLAIN_NUMBER.match(text) or _DOT_THOUSANDS.match(text):
             return None
     else:
         return None
@@ -302,7 +307,7 @@ def parse_price_value(value: Any) -> Decimal | None:
         amount = Decimal(text)
     except InvalidOperation:
         return None
-    if not amount.is_finite() or amount <= 0:
+    if not amount.is_finite() or amount <= 0 or amount > MAX_PRICE:
         return None
     return amount
 
@@ -583,6 +588,42 @@ def _extra_ports(settings: Settings) -> tuple[int, ...]:
     return tuple(ports)
 
 
+def _result_from_page(url: str, page: netguard.FetchedResponse, extracted: dict[str, Any]) -> UrlCheckResult:
+    """Steps 3-4 of :func:`check_url`: JSON-LD of a fetched 2xx page -> result."""
+    documents = extract_jsonld_blocks(page.text())
+    extracted["jsonld_blocks"] = len(documents)
+    offer = extract_offer(documents, page.url)
+    if offer is None:
+        products = find_products(documents)
+        extracted["product_count"] = len(products)
+        message = (
+            "no schema.org Product JSON-LD found on the page"
+            if not products
+            else "Product JSON-LD found but no offer with both a valid price and priceCurrency"
+        )
+        if products:
+            extracted["name"] = _first_text(products[0].get("name"))
+        return UrlCheckResult(
+            url=url, allowed_by_robots=True, found=False, extracted=extracted, message=message
+        )
+    extracted.update(offer)
+    raw = build_raw_listing(offer, page.url)
+    if raw is None:
+        return UrlCheckResult(
+            url=url,
+            allowed_by_robots=True,
+            found=False,
+            extracted=extracted,
+            message="offer found but the product has no name",
+        )
+    message = f"found {raw.currency} {offer['price']} ({offer['price_kind']})"
+    if offer.get("offer_count", 1) > 1:
+        message += f"; {offer['offer_count']} offers on the page, the lowest available one was used"
+    return UrlCheckResult(
+        url=url, allowed_by_robots=True, found=True, raw=raw, extracted=extracted, message=message
+    )
+
+
 # ------------------------------------------------------------------------------------------------
 # public entry point
 # ------------------------------------------------------------------------------------------------
@@ -656,38 +697,17 @@ async def check_url(url: str, settings: Settings, client: httpx.AsyncClient | No
                 extracted=extracted,
                 message=f"page returned HTTP {page.status_code}",
             )
-        documents = extract_jsonld_blocks(page.text())
-        extracted["jsonld_blocks"] = len(documents)
-        offer = extract_offer(documents, page.url)
-        if offer is None:
-            products = find_products(documents)
-            extracted["product_count"] = len(products)
-            message = (
-                "no schema.org Product JSON-LD found on the page"
-                if not products
-                else "Product JSON-LD found but no offer with both a valid price and priceCurrency"
-            )
-            if products:
-                extracted["name"] = _first_text(products[0].get("name"))
-            return UrlCheckResult(
-                url=url, allowed_by_robots=True, found=False, extracted=extracted, message=message
-            )
-        extracted.update(offer)
-        raw = build_raw_listing(offer, page.url)
-        if raw is None:
+        try:
+            return _result_from_page(url, page, extracted)
+        except Exception as exc:  # noqa: BLE001 - hostile page content must never escape as an HTTP 500
+            log.warning("structured data on %s could not be parsed: %r", page.url, exc)
             return UrlCheckResult(
                 url=url,
                 allowed_by_robots=True,
                 found=False,
                 extracted=extracted,
-                message="offer found but the product has no name",
+                message="the structured data on the page could not be parsed",
             )
-        message = f"found {raw.currency} {offer['price']} ({offer['price_kind']})"
-        if offer.get("offer_count", 1) > 1:
-            message += f"; {offer['offer_count']} offers on the page, the lowest available one was used"
-        return UrlCheckResult(
-            url=url, allowed_by_robots=True, found=True, raw=raw, extracted=extracted, message=message
-        )
     finally:
         if own_client:
             await http.aclose()

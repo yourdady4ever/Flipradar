@@ -222,6 +222,75 @@ export function safeHttpUrl(u) {
   }
 }
 
+/**
+ * <input type=date> value -> ISO datetime to send, or null to omit the field so the server stamps its own clock.
+ * Today -> null: any fixed time of day would lie in the future until then, and analytics only counts rows dated
+ * <= now.  Earlier days -> local noon (no day shift in any time zone).  Future days are rejected.
+ */
+export function dateInputToIso(raw, now = new Date()) {
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+  const [y, mo, d] = m ? [Number(m[1]), Number(m[2]) - 1, Number(m[3])] : [];
+  const day = m ? new Date(y, mo, d, 12, 0, 0) : null;
+  if (!day || day.getFullYear() !== y || day.getMonth() !== mo || day.getDate() !== d) throw new Error('invalid date');
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0);
+  if (day.getTime() === today.getTime()) return null;
+  if (day > today) throw new Error('must not be in the future');
+  return day.toISOString();
+}
+
+/** Only a 401 means the token itself was rejected; network errors, 429 and 5xx are transient. */
+export function isAuthRejection(err) {
+  return Boolean(err) && err.status === 401;
+}
+
+/**
+ * Status changes the opportunity drawer offers.  A bought or expired opportunity gets none: watching or dismissing
+ * it and then undoing that would leave it 'seen', so a purchase would count as open potential profit again.
+ */
+export function oppStatusActions(status) {
+  const watch = { label: 'Watch', to: 'watching', message: 'Watching this opportunity.', primary: true };
+  const dismiss = { label: 'Dismiss', to: 'dismissed', message: 'Opportunity dismissed.' };
+  switch (status) {
+    case 'new':
+    case 'seen':
+      return [watch, dismiss];
+    case 'watching':
+      return [{ label: 'Stop watching', to: 'seen', message: 'No longer watching.' }, dismiss];
+    case 'dismissed':
+      return [watch, { label: 'Restore', to: 'seen', message: 'Opportunity restored.' }];
+    default:
+      return [];
+  }
+}
+
+/**
+ * A reload returned an empty page past the end (rows were dismissed, sold or deleted meanwhile): the offset of the
+ * last page that still has rows (0 when nothing is left), else null.  The result is always below `offset`.
+ */
+export function offsetAfterEmptyPage({ offset, limit, total, count }) {
+  if (count > 0 || !(offset > 0) || !(limit > 0) || !isInt(total) || offset < total) return null;
+  return total > 0 ? Math.floor((total - 1) / limit) * limit : 0;
+}
+
+/** Rows describing a stored FX rate.  The source's attribution must be shown with the rate (its terms of use). */
+export function fxRateRows(fx) {
+  return [
+    ['Pair', `${fx.base}/${fx.quote}`],
+    ['Rate', fx.rate],
+    ['Date', fx.rate_date],
+    ['Source', fx.source],
+    fx.attribution ? ['Attribution', fx.attribution] : null,
+  ];
+}
+
+/** Attribution of the stored rate an import estimate used (its fx_source is "<source> (<date>)"), else null. */
+export function importFxAttribution(out, fx) {
+  if (!out || !fx || !fx.attribution) return null;
+  return out.fx_source === `${fx.source} (${fx.rate_date})` ? fx.attribution : null;
+}
+
 /* ============================================================================================
  * DOM helpers
  * ========================================================================================== */
@@ -614,13 +683,13 @@ function readStr(form, name, { required = false } = {}) {
 
 const readBool = (form, name) => Boolean(inputOf(form, name).checked);
 
-/** <input type=date> value -> ISO datetime at local noon (avoids day shifts), or null. */
+/** <input type=date> value -> ISO datetime, or null (empty or today: the server uses its clock).  See dateInputToIso. */
 function readDate(form, name) {
-  const raw = String(inputOf(form, name).value).trim();
-  if (!raw) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
-  if (!m) throw invalid(form, name, `${labelOf(form, name)}: invalid date`);
-  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0).toISOString();
+  try {
+    return dateInputToIso(inputOf(form, name).value);
+  } catch (e) {
+    throw invalid(form, name, `${labelOf(form, name)}: ${e.message}`);
+  }
 }
 
 /* ============================================================================================
@@ -736,7 +805,8 @@ function setLoginMessage(message) {
   msg.textContent = message || '';
 }
 
-function showLogin(message) {
+/** canRetry: a token is still saved in this tab (the last attempt failed for a transient reason). */
+function showLogin(message, { canRetry = false } = {}) {
   state.authed = false;
   stopPolling();
   toggleNav(false);
@@ -748,9 +818,11 @@ function showLogin(message) {
   $('#login-view').hidden = false;
   setLoginMessage(message);
   document.title = 'Sign in · FLIP RADAR';
+  const retry = $('#login-retry');
+  retry.hidden = !canRetry;
   const input = $('#login-token');
   input.value = '';
-  input.focus();
+  (canRetry ? retry : input).focus();
 }
 
 function showApp(check) {
@@ -1181,7 +1253,7 @@ function OpportunitiesView(main, initialRoute) {
     const from = items.length ? oppState.offset + 1 : 0;
     const to = oppState.offset + items.length;
     setChildren(pager, 
-      h('span', { class: 'muted small', 'aria-live': 'polite' }, `Showing ${fmtInt(from)}–${fmtInt(to)} of ${fmtInt(total)}`),
+      h('span', { class: 'muted small', 'aria-live': 'polite' }, `Showing ${fmtInt(from)}–${fmtInt(items.length ? to : 0)} of ${fmtInt(total)}`),
       h('span', { class: 'pager-buttons' },
         button('← Previous', () => { oppState.offset = Math.max(0, oppState.offset - oppState.limit); return load(); }, { small: true, attrs: { disabled: oppState.offset <= 0 } }),
         button('Next →', () => { oppState.offset += oppState.limit; return load(); }, { small: true, attrs: { disabled: to >= total } })));
@@ -1215,6 +1287,13 @@ function OpportunitiesView(main, initialRoute) {
     try {
       const page = await api('/opportunities', { query: query() });
       if (!alive()) return;
+      // e.g. the only row of the last page was dismissed or bought: show the new last page, not an empty one
+      const back = offsetAfterEmptyPage({ offset: oppState.offset, limit: oppState.limit, total: page.total, count: (page.items || []).length });
+      if (back !== null) {
+        oppState.offset = back;
+        await load();
+        return;
+      }
       renderPage(page);
     } catch (err) {
       if (!alive()) return;
@@ -1240,6 +1319,12 @@ function OpportunitiesView(main, initialRoute) {
     },
   };
 }
+
+// Why a bought or expired opportunity offers no Watch / Dismiss (see oppStatusActions).
+const OPP_STATUS_NOTES = new Map([
+  ['bought', 'Bought: the purchase is tracked in Inventory and no longer counts as open potential profit in Analytics, so Watch and Dismiss are not offered. Use “Mark bought…” only to record another purchase.'],
+  ['expired', 'Expired: at the last recompute this listing no longer qualified as an opportunity. It reopens automatically if a later recompute finds it again.'],
+]);
 
 function createOppDrawer({ onChanged }) {
   const titleId = nextId('opp-title');
@@ -1366,16 +1451,13 @@ function createOppDrawer({ onChanged }) {
     };
     const bf = buyForm(d, setOpen);
     const buyToggle = button('Mark bought…', () => setOpen(bf.hidden), { attrs: { 'aria-expanded': 'false' } });
-    const watching = d.status === 'watching';
-    const dismissed = d.status === 'dismissed';
+    const statusActions = oppStatusActions(d.status).map((a) => button(a.label, () => setStatus(d, a.to, a.message), { kind: a.primary ? 'primary' : '' }));
     const facts = d.facts && typeof d.facts === 'object' ? Object.entries(d.facts) : [];
     setChildren(panel, 
       h('div', { class: 'drawer-head' }, h('h2', { id: titleId, tabindex: '-1' }, d.product_title), closeButton()),
       h('div', { class: 'badges' }, d.is_demo ? demoBadge() : null, statusBadge(d.status), riskBadge(d.risk_level), confidenceBadge(d.confidence), demandBadge(d.demand_level), d.category ? badge(d.category) : null),
-      h('div', { class: 'actions' },
-        button(watching ? 'Stop watching' : 'Watch', () => setStatus(d, watching ? 'seen' : 'watching', watching ? 'No longer watching.' : 'Watching this opportunity.'), { kind: watching ? '' : 'primary' }),
-        button(dismissed ? 'Restore' : 'Dismiss', () => setStatus(d, dismissed ? 'seen' : 'dismissed', dismissed ? 'Opportunity restored.' : 'Opportunity dismissed.')),
-        buyToggle),
+      h('div', { class: 'actions' }, statusActions, buyToggle),
+      OPP_STATUS_NOTES.has(d.status) ? h('p', { class: 'muted small' }, OPP_STATUS_NOTES.get(d.status)) : null,
       bf,
       tiles([
         ['Net profit', moneySigned(d.net_profit_cents), 'after all fees, shipping and withholdings'],
@@ -1495,7 +1577,7 @@ function CalculatorView(main) {
       button('Show latest FX rate', async () => {
         try {
           const fx = await api('/fx/latest');
-          setChildren(impResult, card('Latest stored FX rate', kv([['Pair', `${fx.base}/${fx.quote}`], ['Rate', fx.rate], ['Date', fx.rate_date], ['Source', fx.source]])));
+          setChildren(impResult, card('Latest stored FX rate', kv(fxRateRows(fx))));
         } catch (err) {
           if (err.status === 404) setChildren(impResult, h('p', { class: 'notice notice-warn' }, 'No FX rate stored yet. Configure a Banxico token or a manual USD/MXN rate in Settings.'));
           else throw err;
@@ -1513,6 +1595,9 @@ function CalculatorView(main) {
       usd_mxn_rate: rate,
     };
     const out = await api('/calculator/import-costs', { method: 'POST', json: body });
+    // A stored rate from a public source must be shown with its attribution, which only /fx/latest carries.
+    const fx = rate ? null : await api('/fx/latest').catch(() => null);
+    const fxAttribution = importFxAttribution(out, fx);
     if (!alive()) return;
     setChildren(impResult, card(`Estimate: ${out.rule_name}`,
       tiles([
@@ -1524,6 +1609,7 @@ function CalculatorView(main) {
       kv([
         ['Rule', h('code', null, out.rule_key)],
         ['USD → MXN', `${out.usd_mxn_rate} (${out.fx_source})`],
+        fxAttribution ? ['FX attribution', fxAttribution] : null,
         ['Source', out.source_url ? extLink(out.source_url, 'official reference') : 'not recorded'],
         ['As of', out.as_of || '—'],
       ]),
@@ -1646,6 +1732,12 @@ function InventoryView(main, initialRoute) {
         const page = await api('/inventory', { query: { status: invState.status, q: invState.q, limit: invState.limit, offset: invState.offset } });
         if (!isCurrent()) return;
         const items = page.items || [];
+        const back = offsetAfterEmptyPage({ offset: invState.offset, limit: invState.limit, total: page.total, count: items.length });
+        if (back !== null) {
+          invState.offset = back;
+          await load();
+          return;
+        }
         setChildren(results, items.length
           ? table([
             { label: 'Title', cls: 'title-cell', cell: (i) => [h('a', { href: `#/inventory/${i.id}` }, i.title), i.sku ? h('div', { class: 'sub muted' }, `SKU ${i.sku}`) : null] },
@@ -1665,7 +1757,7 @@ function InventoryView(main, initialRoute) {
         const total = isInt(page.total) ? page.total : items.length;
         const to = invState.offset + items.length;
         setChildren(pager, 
-          h('span', { class: 'muted small' }, `Showing ${fmtInt(items.length ? invState.offset + 1 : 0)}–${fmtInt(to)} of ${fmtInt(total)}`),
+          h('span', { class: 'muted small' }, `Showing ${fmtInt(items.length ? invState.offset + 1 : 0)}–${fmtInt(items.length ? to : 0)} of ${fmtInt(total)}`),
           h('span', { class: 'pager-buttons' },
             button('← Previous', () => { invState.offset = Math.max(0, invState.offset - invState.limit); return load(); }, { small: true, attrs: { disabled: invState.offset <= 0 } }),
             button('Next →', () => { invState.offset += invState.limit; return load(); }, { small: true, attrs: { disabled: to >= total } })));
@@ -2140,11 +2232,16 @@ function SourcesView(main) {
           { label: 'Last run', cell: (t) => fmtDateTime(t.last_run_at) },
           { label: 'Actions', cell: (t) => h('div', { class: 'row-actions' },
             button('Run now', async () => {
-              const res = await api(`/searches/${t.id}/run`, { method: 'POST' });
-              setChildren(collectBox.querySelector('.collect-out'), card(`Run result: "${t.query}"`, renderCollectResult(res)));
-              toast(`Search "${t.query}" finished.`, 'success');
-              loadSearches();
-              loadRuns();
+              try {
+                const res = await api(`/searches/${t.id}/run`, { method: 'POST' });
+                setChildren(collectBox.querySelector('.collect-out'), card(`Run result: "${t.query}"`, renderCollectResult(res)));
+                toast(`Search "${t.query}" finished.`, 'success');
+              } finally {
+                // a run (even a failed one) changes the search's and each source's last run / status / error
+                loadSearches();
+                loadRuns();
+                loadSources(true);
+              }
             }, { small: true, kind: 'primary' }),
             button('Edit', () => {
               editing = t;
@@ -2232,8 +2329,10 @@ function SourcesView(main) {
       } catch (err) {
         setChildren(out, errorBox(err));
         throw err;
+      } finally {
+        loadRuns();
+        loadSources(true);
       }
-      loadRuns();
     });
     setChildren(collectBox, f, out);
   }
@@ -2368,7 +2467,7 @@ function SourcesView(main) {
   (async () => {
     try {
       profiles = await getFeeProfiles().catch(() => []);
-      await loadSources();
+      await loadSources(true); // never a cached list: runs (also scheduled ones) change status and errors
       if (!alive()) return;
       renderSearchForm();
       renderCollectForm();
@@ -2588,7 +2687,7 @@ function SettingsView(main) {
   let editing = null;
 
   main.append(
-    viewHeader('Settings', 'Analysis thresholds and the fee profiles used to compute resale costs. Fee values must be verified against the official fee pages; each profile records its source and date.'),
+    viewHeader('Settings', 'Opportunity thresholds, pricing and the fee profiles used to compute resale costs. Fee values must be verified against the official fee pages; each profile records its source and date.'),
     card('Analysis settings', settingsBox),
     card('Fee profiles', profilesBox),
     card(null, profileFormBox));
@@ -2598,11 +2697,16 @@ function SettingsView(main) {
       const st = await api('/settings');
       if (!alive()) return;
       const f = h('form', { class: 'form-grid', novalidate: true, 'aria-label': 'Analysis settings' },
+        h('p', { class: 'field-wide muted small' }, 'Changes to thresholds, pricing and resale fee profiles apply when opportunities are recomputed: press "Recompute opportunities" on Searches & Sources (a collection run only recomputes the products it touched).'),
         field('Min comparables', numInput('min_comparables', { min: '2', max: '100', value: String(st.min_comparables) }), { hint: 'Listings needed before an expected price is computed.' }),
         field('Comparable max age (days)', numInput('comparable_max_age_days', { min: '1', max: '365', value: String(st.comparable_max_age_days) })),
-        field('Default fee profile', select('default_fee_profile_key', feeProfileOptions(profiles), st.default_fee_profile_key)),
-        field('Target ROI (%)', pctInput('target_roi', { value: bpToInput(st.target_roi_bp) })),
-        field('Min net profit (MXN)', moneyInput('min_profit', { value: centsToInput(st.min_profit_cents) })),
+        field('Pricing strategy', select('pricing_strategy', [['competitive', 'Competitive: 25th percentile of comparable prices'], ['market', 'Market: median of comparable prices']], st.pricing_strategy), { hint: 'Used while fewer than "Min comparables" sold prices are known; otherwise their median is used.' }),
+        field('Min ROI for opportunities (%)', pctInput('min_roi', { value: bpToInput(st.min_roi_bp) }), { hint: 'Listings below this ROI do not become opportunities.' }),
+        field('Min net profit (MXN)', moneyInput('min_profit', { value: centsToInput(st.min_profit_cents) }), { hint: 'Listings below this net profit do not become opportunities.' }),
+        field('Resale fee profile: new / refurbished units', select('default_fee_profile_key', feeProfileOptions(profiles), st.default_fee_profile_key)),
+        field('Resale fee profile: used / unknown-condition units', select('default_fee_profile_key_used', feeProfileOptions(profiles), st.default_fee_profile_key_used)),
+        field('Shipping assumed when unknown (MXN)', moneyInput('unknown_shipping', { value: centsToInput(st.unknown_shipping_assumption_cents) }), { hint: 'Added to the buy cost when a listing does not report shipping (it is flagged "shipping unknown"). Empty = $0.' }),
+        field('Calculator target ROI (%)', pctInput('target_roi', { value: bpToInput(st.target_roi_bp) }), { hint: 'Default target for the maximum buy price in the Calculator. It does not filter opportunities.' }),
         field('Manual USD → MXN rate', textInput('fx', { inputmode: 'decimal', value: st.fx_usd_mxn_manual || '', placeholder: 'only without Banxico' }), { hint: 'Used only when no automatic FX source is configured.' }),
         checkField('Include demo data in analysis and lists', checkbox('include_demo', st.include_demo_data), 'Demo rows are always badged DEMO.'),
         h('div', { class: 'field-wide' }, kv([
@@ -2613,12 +2717,18 @@ function SettingsView(main) {
       onSubmit(f, async () => {
         const fx = readStr(f, 'fx');
         if (fx && !/^\d{1,4}(\.\d{1,8})?$/.test(fx)) throw invalid(f, 'fx', 'Manual USD → MXN rate: decimal number expected (e.g. 18.25)');
+        const unknownShipping = readMoney(f, 'unknown_shipping');
         const body = {
           min_comparables: readInt(f, 'min_comparables', { required: true, min: 2, max: 100 }),
           comparable_max_age_days: readInt(f, 'comparable_max_age_days', { required: true, min: 1, max: 365 }),
-          default_fee_profile_key: inputOf(f, 'default_fee_profile_key').value || null,
-          target_roi_bp: readPct(f, 'target_roi', { required: true, max: 100000 }),
+          pricing_strategy: inputOf(f, 'pricing_strategy').value,
+          min_roi_bp: readPct(f, 'min_roi', { required: true, max: 100000 }),
           min_profit_cents: readMoney(f, 'min_profit', { required: true }),
+          default_fee_profile_key: inputOf(f, 'default_fee_profile_key').value || null,
+          default_fee_profile_key_used: inputOf(f, 'default_fee_profile_key_used').value || null,
+          // The API cannot store null back; $0 is what the engine assumes for "no assumption" anyway.
+          unknown_shipping_assumption_cents: unknownShipping ?? (isInt(st.unknown_shipping_assumption_cents) ? 0 : null),
+          target_roi_bp: readPct(f, 'target_roi', { required: true, max: 100000 }),
           // "" explicitly clears a stored manual rate; omit the key when it was and stays empty.
           fx_usd_mxn_manual: fx || (st.fx_usd_mxn_manual ? '' : null),
           include_demo_data: readBool(f, 'include_demo'),
@@ -2827,6 +2937,12 @@ function wireShell() {
   });
   const noAuth = $('#login-noauth');
   noAuth.addEventListener('click', () => busy(noAuth, () => signIn(null).catch(() => {})));
+  const retry = $('#login-retry');
+  retry.addEventListener('click', () => busy(retry, () => {
+    loadHealth();
+    const saved = store.get(TOKEN_KEY);
+    return saved ? resumeSavedSession(saved) : showLogin();
+  }));
   $('#logout-btn').addEventListener('click', logout);
   $('#nav-toggle').addEventListener('click', () => toggleNav());
   for (const a of document.querySelectorAll('#sidenav a')) a.addEventListener('click', () => toggleNav(false));
@@ -2841,21 +2957,28 @@ function wireShell() {
   });
 }
 
+/** Sign in with the token saved in this tab.  Only a 401 discards it: after a network error, 429 or 5xx it is kept,
+ *  so a retry (or a reload) works without pasting it again (create-token prints it only once). */
+async function resumeSavedSession(saved) {
+  try {
+    await signIn(saved);
+  } catch (err) {
+    if (isAuthRejection(err)) {
+      store.del(TOKEN_KEY);
+      showLogin('The saved token is no longer valid. Please sign in again.');
+    } else {
+      const reason = String((err && err.message) || err).replace(/\.$/, '');
+      showLogin(`Could not sign in with the saved token: ${reason}. The token is still saved in this tab; retry when the server is reachable.`, { canRetry: true });
+    }
+  }
+}
+
 async function boot() {
   wireShell();
   loadHealth();
   const saved = store.get(TOKEN_KEY);
-  if (saved) {
-    try {
-      await signIn(saved);
-      return;
-    } catch (err) {
-      store.del(TOKEN_KEY);
-      showLogin(err.status === 401 ? 'The saved token is no longer valid. Please sign in again.' : err.message);
-      return;
-    }
-  }
-  showLogin();
+  if (saved) await resumeSavedSession(saved);
+  else showLogin();
 }
 
 if (typeof document !== 'undefined' && document.getElementById('login-form')) {

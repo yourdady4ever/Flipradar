@@ -12,6 +12,8 @@ from tests.conftest import make_settings
 
 FACTS = {
     "product_title": "Apple iPhone 15 Pro 256GB",
+    # Numbers in free-text facts (titles) are not trusted; the product's own name comes from product_key.
+    "product_key": "apple|iphone 15 pro|256gb",
     "buy_total_cents": 1_000_000,
     "expected_sale_cents": 1_350_000,
     "net_profit_cents": 235_000,

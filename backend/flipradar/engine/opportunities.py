@@ -1,7 +1,8 @@
 """Opportunity detection: combine comparables, fees, risk, demand and scoring.  OWNER: engine agent.
 
-For every active listing of a product the engine asks: *if I bought this one and resold it through
-``fee_model``, what would I make, according to the other observed offers?*
+For every active, recently seen listing of a product the engine asks: *if I bought this one (paying the
+estimated import duties when it ships from abroad) and resold it through ``fee_model``, what would I
+make, according to the other observed offers?*
 
 1. pick independent comparables (:func:`~flipradar.engine.stats.select_comparables`) and compute robust
    statistics with outlier trimming;
@@ -9,14 +10,15 @@ For every active listing of a product the engine asks: *if I bought this one and
 3. expected sale price = median of sold comparables when there are enough of them, otherwise the
    25th percentile (``competitive``) or the median (``market``) of comparable prices;
 4. exact profit/ROI with :func:`~flipradar.finance.calculator.calculate_profit`;
-5. risk flags, demand evidence, score and a fact-grounded explanation.
+5. risk flags, demand evidence (resale-market listings of the candidate's condition class), score and a
+   fact-grounded explanation.
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..finance.calculator import (
     FeeModel,
@@ -29,8 +31,8 @@ from .demand import Observations, estimate_demand
 from .explain import AnalysisContext, build_facts, render_explanation
 from .risk import assess_listing
 from .scoring import score_opportunity
-from .stats import comparable_stats, condition_class, quantile, resale_price_cents, select_comparables
-from .types import ListingView, OpportunityCandidate, PriceStats, RiskFlag
+from .stats import age, comparable_stats, condition_class, quantile, resale_price_cents, select_comparables
+from .types import DemandEstimate, ListingView, OpportunityCandidate, PriceStats, RiskFlag
 
 PRICING_STRATEGIES = {"competitive": "comparables_p25", "market": "comparables_median"}
 
@@ -45,9 +47,14 @@ class AnalysisSettings:
     include_demo: bool = False
     # Shipping cost assumed for buy listings whose shipping is unknown (None = treat as 0 + flag).
     unknown_shipping_assumption_cents: int | None = None
+    # A buy listing must have been seen this recently (and never longer ago than the comparable window):
+    # sources do not report listings that disappeared, so an old sighting is probably sold or withdrawn.
+    buy_max_age_days: int = 3
 
 
-def _skip_reason(listing: ListingView, product_key: str, settings: AnalysisSettings) -> str | None:
+def _skip_reason(
+    listing: ListingView, product_key: str, settings: AnalysisSettings, now: datetime
+) -> str | None:
     """Why a listing cannot be a BUY candidate (None = it can)."""
     if listing.product_key != product_key:
         return "different_product"
@@ -63,7 +70,31 @@ def _skip_reason(listing: ListingView, product_key: str, settings: AnalysisSetti
         return "demo"
     if listing.price_mxn_cents is None or listing.price_mxn_cents <= 0:
         return "no_price"
+    max_age = timedelta(days=min(settings.buy_max_age_days, settings.comparable_max_age_days))
+    if age(now, listing.observed_at) > max_age:
+        return "stale"
+    if listing.import_required and listing.import_costs_mxn_cents is None:
+        return "import_costs_unknown"  # duties cannot be estimated -> no profit estimate
     return None
+
+
+def _demand_pool(
+    pool: list[ListingView], product_key: str, condition: str | None, settings: AnalysisSettings
+) -> list[ListingView]:
+    """Listings whose sales evidence describes resale demand for a unit of ``condition`` class:
+    the Mexican resale market only (no buy-side-only sources), same condition class (for-parts never
+    matches), no accessories, bundles or (unless enabled) demo data.  Sold and ended listings stay."""
+    return [
+        item
+        for item in pool
+        if item.product_key == product_key
+        and item.resale_reference
+        and condition is not None
+        and condition_class(item.condition) == condition
+        and not item.is_accessory
+        and not item.is_bundle
+        and (settings.include_demo or not item.is_demo)
+    ]
 
 
 def _expected_sale(
@@ -121,9 +152,12 @@ def analyze_product(
     Pure function: same inputs -> same outputs.
 
     Candidates are skipped (never estimated) when they are accessories, bundles, for-parts, not active,
-    demo (unless ``settings.include_demo``), without a price, or have fewer than
-    ``settings.min_comparables`` comparables after outlier trimming.  Ties in score are broken by net
-    profit (descending) then listing id (ascending).
+    demo (unless ``settings.include_demo``), without a price, not seen within ``settings.buy_max_age_days``
+    (capped by ``comparable_max_age_days``), imports whose duties could not be estimated, or have fewer
+    than ``settings.min_comparables`` comparables after outlier trimming.  Estimated import duties
+    (``ListingView.import_costs_mxn_cents``) are an acquisition cost.  Demand is estimated per condition
+    class from resale-market listings only.  Ties in score are broken by net profit (descending) then
+    listing id (ascending).
     """
     if settings.pricing_strategy not in PRICING_STRATEGIES:
         raise ValueError(
@@ -133,19 +167,11 @@ def analyze_product(
         raise ValueError("min_comparables must be >= 1")
 
     pool = sorted(listings, key=lambda item: item.id)
-    demand_pool = [
-        item
-        for item in pool
-        if item.product_key == product_key
-        and not item.is_accessory
-        and not item.is_bundle
-        and (settings.include_demo or not item.is_demo)
-    ]
-    demand = estimate_demand(demand_pool, observations, now=now)
+    demand_by_class: dict[str | None, DemandEstimate] = {}
 
     candidates: list[OpportunityCandidate] = []
     for buy in pool:
-        if _skip_reason(buy, product_key, settings) is not None:
+        if _skip_reason(buy, product_key, settings, now) is not None:
             continue
         comparables, excluded = select_comparables(
             buy,
@@ -165,10 +191,13 @@ def analyze_product(
         else:
             shipping = int(buy.shipping_mxn_cents or 0)
         price = int(buy.price_mxn_cents)
-        model = (fee_models_by_condition or {}).get(condition_class(buy.condition) or "", fee_model)
+        import_costs = int(buy.import_costs_mxn_cents or 0) if buy.import_required else 0
+        buy_class = condition_class(buy.condition)
+        model = (fee_models_by_condition or {}).get(buy_class or "", fee_model)
         inputs = ProfitInputs(
             buy_price_cents=price,
             buy_shipping_cents=shipping,
+            import_costs_cents=import_costs,
             sale_price_cents=expected,
             fee=model,
         )
@@ -181,6 +210,11 @@ def analyze_product(
         flags = assess_listing(buy, stats)
         if shipping_assumed:
             flags = _with_shipping_assumption(flags, shipping)
+        if buy_class not in demand_by_class:
+            demand_by_class[buy_class] = estimate_demand(
+                _demand_pool(pool, product_key, buy_class, settings), observations, now=now
+            )
+        demand = demand_by_class[buy_class]
         score, confidence, components = score_opportunity(
             net_profit_cents=profit.net_profit_cents,
             roi_bp=profit.roi_bp,
@@ -208,7 +242,7 @@ def analyze_product(
             fee_profile_key=model.key,
             stats=stats,
             expected_sale_cents=expected,
-            buy_total_cents=price + shipping,
+            buy_total_cents=price + shipping + import_costs,
             profit=profit.to_dict(),
             net_profit_cents=profit.net_profit_cents,
             roi_bp=profit.roi_bp,

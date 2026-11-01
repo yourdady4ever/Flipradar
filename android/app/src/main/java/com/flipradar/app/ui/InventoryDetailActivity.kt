@@ -114,7 +114,7 @@ class InventoryDetailActivity : BaseActivity() {
     private fun showStatusDialog() {
         val i = item ?: return
         val form = vbox()
-        val statuses = InventoryStatus.UPDATE
+        val statuses = InventoryStatus.editChoices(i.status) // includes "sold" for a sold item, preselected
         val sp = spinner(statuses.map { Labels.inventoryStatus(this, it) }, statuses.indexOf(i.status).coerceAtLeast(0))
         val target = moneyInput(getString(R.string.optional), i.targetSaleCents?.let { Money.centsToInput(it) })
         val channel = input(getString(R.string.optional), initial = i.listedChannel)
@@ -123,11 +123,9 @@ class InventoryDetailActivity : BaseActivity() {
         form.addView(labeled(getString(R.string.inv_listed_channel), channel), lp())
         formDialog(getString(R.string.inv_change_status), form, getString(R.string.action_save)) {
             val tg = optionalMoney(target) ?: return@formDialog false
-            val update = InventoryUpdate(
-                status = statuses.getOrNull(sp.selectedItemPosition),
-                targetSaleCents = tg.value,
-                listedChannel = channel.text.toString().trim().ifEmpty { null },
-            )
+            // Only what changed; an emptied target or channel is sent as null so the server clears it.
+            val update = InventoryUpdate.fromStatusForm(i, statuses.getOrNull(sp.selectedItemPosition), tg.value, channel.text.toString())
+            if (update.isEmpty) return@formDialog true
             call({ api -> api.updateInventory(id, update) }, toastErrors = true) { render(it) }
             true
         }

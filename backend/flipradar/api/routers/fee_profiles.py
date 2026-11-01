@@ -75,8 +75,13 @@ def delete_profile(key: str, db: Session = Depends(get_db), settings: Settings =
     row = _get(db, key)
     if row.is_builtin:
         raise HTTPException(409, "built-in fee profiles cannot be deleted (edit them instead)")
+    # Both resale defaults (new/refurbished and used/unknown units) must keep pointing at a real profile;
+    # otherwise analysis would silently fall back to another profile with different fees and withholdings.
     if settings_store.get_value(db, "default_fee_profile_key", settings) == key:
         raise HTTPException(409, "this profile is the default fee profile; choose another default first")
+    if settings_store.get_value(db, "default_fee_profile_key_used", settings) == key:
+        raise HTTPException(409, "this profile is the default fee profile for used units "
+                                 "(default_fee_profile_key_used); choose another default first")
     for source in db.scalars(select(Source).where(Source.default_fee_profile_key == key)):
         source.default_fee_profile_key = None
     db.delete(row)

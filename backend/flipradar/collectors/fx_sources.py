@@ -1,13 +1,15 @@
 """USD -> MXN exchange rate with a free fallback chain.  OWNER: collectors agent.
 
-Order (first success wins, every failure reason is kept):
+Order (the first FRESH quote wins; every failure reason is kept):
 
 1. **Banxico SIE FIX** (official, needs the free ``FLIPRADAR_BANXICO_TOKEN``) - ``is_official=True``.
 2. **Frankfurter** (no key; European Central Bank reference rates crossed to USD/MXN) - an *estimate*.
 3. **ExchangeRate-API open access** (no key; attribution required; we request it at most once per 24 h
    per process and reuse the cached quote) - an *estimate*.
 
-The manual ``FLIPRADAR_FX_USD_MXN_MANUAL`` rate is applied by the service layer, not here.
+A source that answers with a quote older than :data:`MAX_QUOTE_AGE_DAYS` (e.g. a frozen API version)
+counts as failed and the next source is tried.  The manual ``FLIPRADAR_FX_USD_MXN_MANUAL`` rate is applied
+by the service layer, not here.
 Optional settings read with ``getattr``: ``frankfurter_api_base``, ``exchangerate_api_url`` and
 ``fx_public_sources_enabled`` (default True).
 """
@@ -17,7 +19,7 @@ from __future__ import annotations
 import email.utils
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -32,6 +34,9 @@ from .base import CollectorError
 FRANKFURTER_DEFAULT_BASE = "https://api.frankfurter.dev/v1"
 EXCHANGERATE_API_DEFAULT_URL = "https://open.er-api.com/v6/latest/USD"
 EXCHANGERATE_API_MIN_INTERVAL_SECONDS = 24 * 3600
+
+#: Quotes older than this (calendar days) are stale - the same rule as ``services.fx.MAX_FX_AGE_DAYS``.
+MAX_QUOTE_AGE_DAYS = 7
 
 SOURCE_BANXICO = "banxico_fix"
 SOURCE_FRANKFURTER = "frankfurter_ecb"
@@ -155,23 +160,44 @@ async def fetch_exchangerate_api(settings: Settings, client: httpx.AsyncClient |
     return quote
 
 
-async def get_usd_mxn(settings: Settings, client: httpx.AsyncClient | None = None) -> FxQuote:
-    """Best available USD/MXN quote.  Raises CollectorError listing every source's failure reason."""
+def quote_is_fresh(rate_date: str, today: date) -> bool:
+    """True when ``rate_date`` (YYYY-MM-DD) is at most :data:`MAX_QUOTE_AGE_DAYS` before ``today``."""
+    try:
+        when = date.fromisoformat(rate_date[:10])
+    except ValueError:
+        return False
+    return today - when <= timedelta(days=MAX_QUOTE_AGE_DAYS)
+
+
+async def get_usd_mxn(
+    settings: Settings, client: httpx.AsyncClient | None = None, *, today: date | None = None
+) -> FxQuote:
+    """Best available FRESH USD/MXN quote.  Raises CollectorError listing every source's failure reason.
+
+    A quote older than :data:`MAX_QUOTE_AGE_DAYS` before ``today`` (default: the current UTC date) is that
+    source's failure, so the chain moves on to the next source instead of stopping at a stale answer."""
+    today = today or datetime.now(UTC).date()
     errors: list[str] = []
+    sources: list[tuple[str, str, Any]] = []  # (label, error prefix, fetch function)
+    if (settings.banxico_token or "").strip():
+        sources.append(("banxico", "banxico: ", fetch_banxico))
+    else:
+        errors.append("banxico: not configured (FLIPRADAR_BANXICO_TOKEN)")
+    if not getattr(settings, "fx_public_sources_enabled", True):
+        errors.append("public fallback sources disabled")
+    else:
+        sources.append(("frankfurter", "", fetch_frankfurter))  # their errors already carry the label
+        sources.append(("exchangerate-api", "", fetch_exchangerate_api))
     async with netguard.http_client(settings, client) as http:
-        if (settings.banxico_token or "").strip():
+        for label, prefix, fetch in sources:
             try:
-                return await fetch_banxico(settings, http)
+                quote = await fetch(settings, http)
             except CollectorError as exc:  # includes CollectorNotConfigured
-                errors.append(f"banxico: {exc}")
-        else:
-            errors.append("banxico: not configured (FLIPRADAR_BANXICO_TOKEN)")
-        if not getattr(settings, "fx_public_sources_enabled", True):
-            errors.append("public fallback sources disabled")
-        else:
-            for fetch in (fetch_frankfurter, fetch_exchangerate_api):
-                try:
-                    return await fetch(settings, http)
-                except CollectorError as exc:
-                    errors.append(str(exc))
+                errors.append(f"{prefix}{exc}")
+                continue
+            if quote_is_fresh(quote.rate_date, today):
+                return quote
+            errors.append(
+                f"{label}: stale USD/MXN rate dated {quote.rate_date} (older than {MAX_QUOTE_AGE_DAYS} days)"
+            )
     raise CollectorError("no USD/MXN exchange rate available: " + "; ".join(errors))

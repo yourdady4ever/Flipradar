@@ -30,8 +30,13 @@ deterministic formulas (`backend/flipradar`); the app only displays and edits da
 
 Background notifications: `NotificationPollJob` (JobScheduler, periodic ≥ 15 min, requires network,
 persisted across reboots, re-scheduled by `BootReceiver`) calls
-`GET /api/v1/notifications?unread_only=true&since_id=<last seen>` and posts up to 5 Android notifications
-(channel `opportunities`) plus a summary; tapping one opens the opportunity and marks it read.
+`GET /api/v1/notifications?unread_only=true&since_id=0&limit=50` (the newest page) and posts the unread
+notifications created after the last one already shown (up to 5 Android notifications on channel
+`opportunities`, plus a summary); tapping one opens the opportunity and marks it read. "Already shown"
+is a cursor of id + server `created_at` (`NotificationCursor`), because the server reuses ids after its
+newest rows are deleted (e.g. clear-demo) or its database is reset; changing the server URL resets it.
+A failed poll (e.g. a LAN-only server while the phone is away) simply waits for the next period; it never
+asks JobScheduler for exponential backoff.
 
 ## Build
 
@@ -112,7 +117,9 @@ out of git) and sign with `apksigner sign --ks release.jks …` or configure `si
    - URL: e.g. `http://192.168.1.20:8000` (LAN IP of the computer running the backend). From the Android
      emulator, the host machine is `http://10.0.2.2:8000`.
      Without a scheme, `http://` is assumed for private/LAN hosts and `https://` otherwise.
-   - Token: paste it (leave blank later to keep the saved one; "Forget saved token" removes it).
+   - Token: paste it (leave blank later to keep the saved one; "Forget saved token" removes it). The saved
+     token belongs to the saved server URL: it is not sent when you test another URL, and saving a
+     different URL removes it, so paste the token of the new server.
    - Background check interval (Off, 15 min … 12 h).
 3. **Test connection** (checks `/health`, API version and the token), then **Save**.
 
@@ -122,6 +129,8 @@ out of git) and sign with `apksigner sign --ks release.jks …` or configure `si
   + IV are in SharedPreferences. It is never logged, never put in URLs or error messages, and only sent in
   the `Authorization: Bearer` header — never to `/health`.
 - HTTP redirects are **not followed**, so the token can't be forwarded to another host.
+- The saved token is bound to the server URL it was saved with: changing the URL in Server settings
+  removes it, and "Test connection" never sends it to a different URL.
 - Cleartext HTTP is allowed (`res/xml/network_security_config.xml`) because self-hosted servers usually run
   on a LAN without a certificate. The Setup screen warns when an `http://` URL points to a public host.
   For remote access use HTTPS (reverse proxy) or a VPN (WireGuard/Tailscale). User-installed CAs are

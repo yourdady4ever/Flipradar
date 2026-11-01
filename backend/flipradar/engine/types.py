@@ -106,6 +106,12 @@ class ListingView:
     # False for listings that are only BUY-side evidence (e.g. eBay US, retail deal feeds, single retailer
     # pages): they can be purchase candidates but never define the Mexican resale price.
     resale_reference: bool = True
+    # Cross-border purchase: the item ships from outside Mexico and must be imported.  The service layer
+    # estimates the duties with ``finance.import_costs``; ``import_costs_mxn_cents`` None on an import means
+    # they could not be estimated (formal import, no USD rate) and the listing is never a buy candidate.
+    import_required: bool = False
+    import_costs_mxn_cents: int | None = None
+    import_note: str | None = None  # how the duties were estimated, or why they could not be
 
 
 @dataclass

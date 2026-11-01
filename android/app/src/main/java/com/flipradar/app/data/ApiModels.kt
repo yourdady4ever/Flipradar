@@ -1,5 +1,6 @@
 package com.flipradar.app.data
 
+import com.flipradar.app.util.Formats
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -409,6 +410,15 @@ data class OpportunityOut(
         val STATUSES = listOf("new", "seen", "watching", "dismissed", "bought", "expired")
         val SORTS = listOf("score", "profit", "roi", "recent")
 
+        /** Status filter value for every status.  Sending no status gets the server's default open set. */
+        const val STATUS_ALL = "all"
+
+        /**
+         * Status filter choices for the opportunity list: null (no parameter: the server's default open
+         * statuses new/seen/watching/bought), [STATUS_ALL] (also dismissed and expired), then each status.
+         */
+        val STATUS_FILTERS: List<String?> = listOf(null, STATUS_ALL) + STATUSES
+
         fun parse(o: JSONObject) = OpportunityOut(
             id = o.long("id"),
             productId = o.long("product_id"),
@@ -622,6 +632,13 @@ object InventoryStatus {
     /** Values used for list filtering (server may also report "sold"). */
     val FILTER = listOf("purchased", "in_transit", "in_stock", "listed", "sold", "returned", "written_off")
     val CONDITIONS = listOf("new", "used", "refurbished", "for_parts", "unknown")
+
+    /**
+     * Status choices when editing an item that is in [current]: the [UPDATE] values, with [current] first
+     * when it is not one of them (e.g. "sold", which only the server sets), so the form shows the real
+     * status instead of silently preselecting another one.
+     */
+    fun editChoices(current: String): List<String> = if (current in UPDATE) UPDATE else listOf(current) + UPDATE
 }
 
 data class InventoryIn(
@@ -655,20 +672,55 @@ data class InventoryIn(
         .putIfNotNull("notes", notes?.ifBlank { null })
 }
 
-/** Partial update: only non-null fields are sent. */
+/**
+ * Partial update: only non-null fields are sent, plus the JSON keys named in [clear], which are sent as
+ * explicit nulls so the server clears them (a missing key leaves the stored value unchanged).
+ */
 data class InventoryUpdate(
     val status: String? = null,
     val targetSaleCents: Long? = null,
     val listedChannel: String? = null,
     val location: String? = null,
     val notes: String? = null,
+    val clear: Set<String> = emptySet(),
 ) {
-    fun toJson(): JSONObject = JSONObject()
-        .putIfNotNull("status", status)
-        .putIfNotNull("target_sale_cents", targetSaleCents)
-        .putIfNotNull("listed_channel", listedChannel)
-        .putIfNotNull("location", location)
-        .putIfNotNull("notes", notes)
+    fun toJson(): JSONObject {
+        val o = JSONObject()
+            .putIfNotNull("status", status)
+            .putIfNotNull(TARGET_SALE, targetSaleCents)
+            .putIfNotNull(LISTED_CHANNEL, listedChannel)
+            .putIfNotNull("location", location)
+            .putIfNotNull("notes", notes)
+        for (key in clear) if (!o.has(key)) o.put(key, JSONObject.NULL)
+        return o
+    }
+
+    /** True when there is nothing to send. */
+    val isEmpty: Boolean get() = toJson().length() == 0
+
+    companion object {
+        const val TARGET_SALE = "target_sale_cents"
+        const val LISTED_CHANNEL = "listed_channel"
+
+        /**
+         * The PATCH for the "Change status" form of [item], containing only what the user changed.  The
+         * status is sent only when another one was picked: an item the server marked "sold" keeps it
+         * (re-sending an open status for it is rejected with 409).  A target price or channel the user
+         * emptied is sent as null so the server clears it instead of keeping the old value.
+         */
+        fun fromStatusForm(item: InventoryOut, status: String?, targetSaleCents: Long?, listedChannel: String?): InventoryUpdate {
+            val channel = listedChannel?.trim()?.ifEmpty { null }
+            val clear = LinkedHashSet<String>()
+            if (targetSaleCents == null && item.targetSaleCents != null) clear += TARGET_SALE
+            if (channel == null && item.listedChannel != null) clear += LISTED_CHANNEL
+            return InventoryUpdate(
+                status = status?.takeIf { it != item.status },
+                targetSaleCents = targetSaleCents?.takeIf { it != item.targetSaleCents },
+                listedChannel = channel?.takeIf { it != item.listedChannel },
+                clear = clear,
+            )
+        }
+    }
 }
 
 data class SaleIn(
@@ -935,12 +987,43 @@ data class NotificationOut(
         )
 
         /**
-         * Notifications newer than [lastSeenId], oldest first (the API returns newest first), capped at
-         * [max] most recent.  Used by the background poller so restarts never re-post old items.
+         * Unread notifications newer than [lastSeenId], oldest first (the API returns newest first), capped
+         * at the [max] most recent.  Id-only form of [NotificationCursor.unseen].
          */
         fun newSince(items: List<NotificationOut>, lastSeenId: Long, max: Int): List<NotificationOut> =
-            items.filter { it.id > lastSeenId && !it.isRead }.sortedBy { it.id }.takeLast(max)
+            NotificationCursor(lastSeenId).unseen(items).takeLast(max)
     }
+}
+
+/**
+ * The newest notification the user has already been shown (posted by the background poller or listed
+ * in the app): its id and the server's created_at.
+ *
+ * "Newer" compares created_at, and the id only breaks ties.  An id alone is not a safe cursor: the
+ * server reuses ids once its newest rows are deleted (clear-demo; SQLite rowids without AUTOINCREMENT)
+ * and a reset database starts again at 1, so a stale high id would hide every new notification.  When
+ * either timestamp is missing or unparseable, ids are compared instead.
+ */
+data class NotificationCursor(val id: Long = 0L, val createdAt: String? = null) {
+
+    /** True when the notification ([otherId], created at [otherCreatedAt]) came after this cursor. */
+    fun isBefore(otherId: Long, otherCreatedAt: String?): Boolean {
+        val mine = Formats.parseInstant(createdAt)
+        val theirs = Formats.parseInstant(otherCreatedAt)
+        if (mine == null || theirs == null) return otherId > id
+        val byTime = theirs.compareTo(mine)
+        return byTime > 0 || (byTime == 0 && otherId > id)
+    }
+
+    fun isBefore(n: NotificationOut): Boolean = isBefore(n.id, n.createdAt)
+
+    /** Unread notifications in [items] that came after this cursor, oldest first. */
+    fun unseen(items: List<NotificationOut>): List<NotificationOut> =
+        items.filter { !it.isRead && isBefore(it) }.sortedBy { it.id }
+
+    /** This cursor moved to the newest of [items]; it never moves backwards. */
+    fun advancedTo(items: List<NotificationOut>): NotificationCursor =
+        items.fold(this) { cursor, n -> if (cursor.isBefore(n)) NotificationCursor(n.id, n.createdAt) else cursor }
 }
 
 /** Parses a JSON array body into a list using [item]. */

@@ -5,8 +5,11 @@ Format (see docs/API_CONTRACT.md): header row required, case-insensitive columns
 ``shipping``, ``source`` (default ``manual``), ``external_id`` (default: hash of url, else of title),
 ``brand``, ``model``, ``gtin``, ``seller``, ``location``, ``sold_quantity``, ``available_quantity`` and
 ``observed_at`` (ISO date/datetime, UTC when no offset).  Max 5 MB and 20 000 rows.  ``,`` or ``;``
-delimiters are accepted.  Rows with problems are rejected individually (the first 50 errors are
-reported); the rest are imported.
+delimiters are accepted.  In ``,``-delimited files amounts use ``.`` for decimals (``,`` only groups
+thousands); ``;``-delimited files (decimal-comma spreadsheets) may also use ``1.234,50``.  Amounts whose
+decimal separator is ambiguous (``12,50`` in a ``,`` file, ``1,234`` or ``1.234`` in a ``;`` file) are
+rejected, never guessed.  Rows with problems - including out-of-range numbers and oversized cells - are
+rejected individually (the first 50 errors are reported); the rest are imported.
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..engine.types import RawListing
 from ..models import Source, SourceKind
-from ..money import pesos_to_cents
+from ..money import MAX_CENTS, AmbiguousAmountError, parse_amount, pesos_to_cents
 from ..schemas import ImportResult
 from . import analysis
 from .bootstrap import ensure_source
@@ -36,6 +39,8 @@ from .timeutil import as_utc, utcnow
 MAX_BYTES = 5 * 1024 * 1024
 MAX_ROWS = 20_000
 MAX_REPORTED_ERRORS = 50
+MAX_QUANTITY = 2**31 - 1
+MAX_CELL_CHARS = 2_000  # per cell (titles: 500); a whole-file field limit protects the parser itself
 FUTURE_TOLERANCE = timedelta(minutes=10)
 KNOWN_COLUMNS = {
     "title", "price", "currency", "url", "condition", "shipping", "source", "external_id", "brand", "model",
@@ -60,27 +65,38 @@ def _cell(row: dict[str, Any], key: str) -> str | None:
     return text or None
 
 
-def _int_cell(row: dict[str, Any], key: str) -> int | None:
+def _int_cell(row: dict[str, Any], key: str, delimiter: str = ",") -> int | None:
+    """Whole number: ``1234``, or grouped ``1,234`` (``,`` files) / ``1.234`` (``;`` files)."""
     text = _cell(row, key)
     if text is None:
         return None
-    try:
-        value = int(text.replace(",", ""))
-    except ValueError as exc:
-        raise ValueError(f"{key} must be a whole number") from exc
-    if value < 0:
+    group = "," if delimiter == "," else "."
+    if re.fullmatch(r"-\s*[0-9][0-9,.]*", text):
         raise ValueError(f"{key} cannot be negative")
+    if re.fullmatch(r"[0-9]+", text):
+        value = int(text)
+    elif re.fullmatch(r"[0-9]{1,3}(?:" + re.escape(group) + r"[0-9]{3})+", text):
+        value = int(text.replace(group, ""))
+    else:
+        raise ValueError(f"{key} must be a whole number")
+    if value > MAX_QUANTITY:
+        raise ValueError(f"{key} is out of range (max {MAX_QUANTITY})")
     return value
 
 
-def _money_cell(row: dict[str, Any], key: str) -> int | None:
+def _money_cell(row: dict[str, Any], key: str, delimiter: str = ",") -> int | None:
     text = _cell(row, key)
     if text is None:
         return None
     try:
-        cents = pesos_to_cents(text)
+        cents = pesos_to_cents(parse_amount(text, decimal_comma=delimiter == ";"))
+    except AmbiguousAmountError as exc:
+        hint = "1234.50" if delimiter == "," else "1234.50 or 1234,50"
+        raise ValueError(f"{key} has an ambiguous decimal separator: {text[:30]!r} (write e.g. {hint})") from exc
     except (ValueError, ArithmeticError) as exc:
         raise ValueError(f"{key} is not a valid amount: {text[:30]!r}") from exc
+    if abs(cents) > MAX_CENTS:
+        raise ValueError(f"{key} is out of range: {text[:30]!r}")
     return cents
 
 
@@ -96,7 +112,7 @@ def _parse_observed_at(text: str | None, now: datetime) -> datetime | None:
             d = date.fromisoformat(raw)
             return min(datetime(d.year, d.month, d.day, 12, 0, tzinfo=UTC), now)
         return as_utc(datetime.fromisoformat(raw))
-    except ValueError as exc:
+    except (ValueError, ArithmeticError) as exc:  # OverflowError: e.g. year 1 with a positive offset
         raise ValueError(f"observed_at is not an ISO date: {text[:30]!r}") from exc
 
 
@@ -120,7 +136,13 @@ def parse_csv(data: bytes, *, default_source: str = "manual", now: datetime | No
     if not text.strip():
         raise CsvImportError("file is empty")
     first_line = text.splitlines()[0] if text.splitlines() else ""
-    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=_detect_delimiter(first_line))
+    delimiter = _detect_delimiter(first_line)
+    # The csv module refuses fields over 128 KiB with csv.Error, which used to abort the whole file.  The
+    # file is already capped at MAX_BYTES, so allow fields of any size here and reject oversized cells
+    # per row below.  (Raising the process-wide limit only ever makes other readers more permissive.)
+    if csv.field_size_limit() < MAX_BYTES + 1:
+        csv.field_size_limit(MAX_BYTES + 1)
+    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=delimiter)
     if not reader.fieldnames:
         raise CsvImportError("missing header row")
     normalized = [(name or "").strip().lower() for name in reader.fieldnames]
@@ -132,7 +154,18 @@ def parse_csv(data: bytes, *, default_source: str = "manual", now: datetime | No
     errors: list[str] = []
     total = 0
     now = as_utc(now or utcnow())
-    for record in reader:
+    records = iter(reader)
+    while True:
+        try:
+            record = next(records)
+        except StopIteration:
+            break
+        except csv.Error as exc:  # defensive: a malformed record rejects only itself
+            total += 1
+            if total > MAX_ROWS:
+                raise CsvTooLarge(f"more than {MAX_ROWS} rows") from exc
+            errors.append(f"line {reader.line_num}: could not be parsed as CSV ({exc})")
+            continue
         total += 1
         if total > MAX_ROWS:
             raise CsvTooLarge(f"more than {MAX_ROWS} rows")
@@ -140,12 +173,15 @@ def parse_csv(data: bytes, *, default_source: str = "manual", now: datetime | No
         try:
             if None in record:  # more cells than headers
                 raise ValueError("row has more columns than the header")
+            for key, value in record.items():
+                if key != "title" and isinstance(value, str) and len(value) > MAX_CELL_CHARS:
+                    raise ValueError(f"{key or 'cell'} longer than {MAX_CELL_CHARS} characters")
             title = _cell(record, "title")
             if not title:
                 raise ValueError("title is required")
             if len(title) > 500:
                 raise ValueError("title longer than 500 characters")
-            price = _money_cell(record, "price")
+            price = _money_cell(record, "price", delimiter)
             if price is None:
                 raise ValueError("price is required")
             if price <= 0:
@@ -153,7 +189,7 @@ def parse_csv(data: bytes, *, default_source: str = "manual", now: datetime | No
             currency = (_cell(record, "currency") or "MXN").upper()
             if not re.fullmatch(r"[A-Z]{3}", currency):
                 raise ValueError(f"invalid currency {currency[:10]!r}")
-            shipping = _money_cell(record, "shipping")
+            shipping = _money_cell(record, "shipping", delimiter)
             if shipping is not None and shipping < 0:
                 raise ValueError("shipping cannot be negative")
             source = (_cell(record, "source") or default_source).lower()
@@ -185,13 +221,13 @@ def parse_csv(data: bytes, *, default_source: str = "manual", now: datetime | No
                 seller_id=seller[:64] if seller else None,
                 seller_name=seller,
                 location=_cell(record, "location"),
-                available_quantity=_int_cell(record, "available_quantity"),
-                sold_quantity=_int_cell(record, "sold_quantity"),
+                available_quantity=_int_cell(record, "available_quantity", delimiter),
+                sold_quantity=_int_cell(record, "sold_quantity", delimiter),
                 observed_at=observed_at,
                 raw={"csv_line": line, **{k: v for k, v in record.items() if k in KNOWN_COLUMNS and v}},
             )
             rows.append((source, raw))
-        except ValueError as exc:
+        except (ValueError, ArithmeticError) as exc:
             errors.append(f"line {line}: {exc}")
     return rows, total, errors
 

@@ -26,10 +26,20 @@ def list_notifications(
     limit: int = Query(50, ge=1, le=MAX_PAGE_SIZE),
     db: Session = Depends(get_db),
 ) -> list[NotificationOut]:
+    """Notifications, newest first.
+
+    Without ``since_id`` (or with 0) this is the newest page (the inbox).  With ``since_id > 0`` it is a
+    forward cursor: the ``limit`` OLDEST notifications with ``id > since_id`` (still listed newest first),
+    so a poller that passes the highest id it has seen as the next ``since_id`` never skips notifications
+    when more than ``limit`` arrive between two polls.  A page shorter than ``limit`` means caught up.
+    """
     stmt = select(Notification).where(Notification.id > since_id)
     if unread_only:
         stmt = stmt.where(Notification.read_at.is_(None))
-    rows = db.scalars(stmt.order_by(Notification.id.desc()).limit(limit)).all()
+    if since_id > 0:
+        rows = list(reversed(db.scalars(stmt.order_by(Notification.id.asc()).limit(limit)).all()))
+    else:
+        rows = list(db.scalars(stmt.order_by(Notification.id.desc()).limit(limit)).all())
     return [_out(n) for n in rows]
 
 

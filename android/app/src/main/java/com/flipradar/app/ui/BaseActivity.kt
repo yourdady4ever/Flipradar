@@ -17,6 +17,7 @@ import com.flipradar.app.R
 import com.flipradar.app.data.ApiClient
 import com.flipradar.app.data.Settings
 import com.flipradar.app.util.Async
+import com.flipradar.app.util.TaskRunner
 
 /**
  * Shared screen plumbing: progress/error banner scaffold, background API calls bound to the Activity
@@ -24,7 +25,7 @@ import com.flipradar.app.util.Async
  */
 abstract class BaseActivity : Activity() {
     protected val settings: Settings by lazy { Settings(this) }
-    private val tasks = ArrayList<Async.Task>()
+    private val tasks = ArrayList<TaskRunner.Task>()
     private var busyCount = 0
     private var progressBar: ProgressBar? = null
     private var errorView: TextView? = null
@@ -115,7 +116,7 @@ abstract class BaseActivity : Activity() {
     ) {
         val api = apiOrSetup() ?: return
         setBusy(true)
-        var task: Async.Task? = null
+        var task: TaskRunner.Task? = null
         task = Async.run(
             { work(api) },
             { result ->

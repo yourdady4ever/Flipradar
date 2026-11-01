@@ -15,9 +15,11 @@ import com.flipradar.app.data.ApiClient
 import com.flipradar.app.data.ApiException
 import com.flipradar.app.data.SUPPORTED_API_VERSION
 import com.flipradar.app.data.Settings
+import com.flipradar.app.data.TokenBinding
 import com.flipradar.app.notify.PollScheduler
 import com.flipradar.app.util.Async
 import com.flipradar.app.util.ServerUrl
+import com.flipradar.app.util.TaskRunner
 
 /** Server URL + API token configuration with a connection test. */
 class SetupActivity : BaseActivity() {
@@ -27,7 +29,7 @@ class SetupActivity : BaseActivity() {
     private lateinit var result: TextView
     private lateinit var pollSpinner: Spinner
     private lateinit var showToken: CheckBox
-    private var testTask: Async.Task? = null
+    private var testTask: TaskRunner.Task? = null
 
     override val showUp: Boolean get() = settings.isConfigured
 
@@ -44,7 +46,7 @@ class SetupActivity : BaseActivity() {
         form.addView(warning, lp())
 
         tokenInput = input(
-            getString(if (settings.hasToken) R.string.setup_token_hint_saved else R.string.setup_token_hint),
+            getString(R.string.setup_token_hint),
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD,
         )
         form.addView(labeled(getString(R.string.setup_token_label), tokenInput), lp())
@@ -61,7 +63,7 @@ class SetupActivity : BaseActivity() {
             form.addView(flatButton(getString(R.string.setup_forget_token)) {
                 confirm(getString(R.string.setup_forget_token_confirm)) {
                     settings.setToken(null)
-                    tokenInput.hint = getString(R.string.setup_token_hint)
+                    updateTokenHint()
                     toast(getString(R.string.setup_token_forgotten))
                 }
             }, lp(WRAP, WRAP))
@@ -87,10 +89,14 @@ class SetupActivity : BaseActivity() {
         urlInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) = updateWarning()
+            override fun afterTextChanged(s: Editable?) {
+                updateWarning()
+                updateTokenHint()
+            }
         })
         setScreen(form, scrollable = true)
         updateWarning()
+        updateTokenHint()
     }
 
     override fun onDestroy() {
@@ -115,6 +121,17 @@ class SetupActivity : BaseActivity() {
         }
     }
 
+    /** The saved token is only offered for the server it was saved for (see [TokenBinding]). */
+    private fun updateTokenHint() {
+        tokenInput.hint = getString(
+            when {
+                !settings.hasToken -> R.string.setup_token_hint
+                ServerUrl.sameServer(settings.serverUrl, urlInput.text.toString()) -> R.string.setup_token_hint_saved
+                else -> R.string.setup_token_hint_other_server
+            },
+        )
+    }
+
     private fun problemText(p: ServerUrl.Problem): String = getString(
         when (p) {
             ServerUrl.Problem.EMPTY -> R.string.url_err_empty
@@ -127,8 +144,9 @@ class SetupActivity : BaseActivity() {
         },
     )
 
-    /** Token typed in the form, or the saved one when the field is left blank. */
-    private fun effectiveToken(): String? = tokenInput.text.toString().trim().ifEmpty { null } ?: settings.getToken()
+    /** Token typed in the form, or, when the field is blank, the saved one if [url] is the server it was saved for. */
+    private fun effectiveToken(url: String): String? =
+        TokenBinding.tokenFor(url, tokenInput.text.toString(), settings.serverUrl) { settings.getToken() }
 
     private fun validUrl(): String? {
         return when (val r = ServerUrl.normalize(urlInput.text.toString())) {
@@ -142,10 +160,10 @@ class SetupActivity : BaseActivity() {
 
     private fun testConnection() {
         val url = validUrl() ?: return
-        val client = ApiClient(url, effectiveToken(), connectTimeoutMs = 8_000, readTimeoutMs = 15_000)
+        val client = ApiClient(url, effectiveToken(url), connectTimeoutMs = 8_000, readTimeoutMs = 15_000)
         result.text = getString(R.string.setup_testing)
+        testTask?.cancel() // a replaced test never reports back: its onCancel releases its busy slot
         setBusy(true)
-        testTask?.cancel()
         testTask = Async.run(
             {
                 val health = client.health()
@@ -181,12 +199,13 @@ class SetupActivity : BaseActivity() {
                 setBusy(false)
                 result.text = Labels.error(this, e)
             },
+            onCancel = { setBusy(false) },
         )
     }
 
     private fun save() {
         val url = validUrl() ?: return
-        settings.serverUrl = url
+        settings.changeServer(url) // another server: drops the saved token and notification cursor
         val typed = tokenInput.text.toString().trim()
         if (typed.isNotEmpty() && !settings.setToken(typed)) {
             toast(getString(R.string.setup_token_store_failed))

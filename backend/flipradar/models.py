@@ -405,6 +405,9 @@ class InventoryItem(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    # When the status became written_off (the date the remaining cost is booked as a realized loss).  Added
+    # after the first release: services/bootstrap.ensure_added_columns adds it to existing databases.
+    written_off_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
 
     sales: Mapped[list[Sale]] = relationship(back_populates="item", cascade="all, delete-orphan")
 

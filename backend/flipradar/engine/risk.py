@@ -6,16 +6,20 @@ removing accents (``"Réplica"`` -> ``"replica"``, ``"compañía"`` -> ``"compan
 
 Mexican listings very often *deny* a problem ("100% original, no es réplica", "libre de iCloud",
 "no reportado", "liberado para cualquier compañía").  Rules marked negatable are therefore ignored
-when a negation word (no, ni, sin, cero, nada, nunca, "libre de"...) appears among the three words
-before the match within the same clause.  This keeps critical flags precise; anything ambiguous is
-reported with the matched terms as evidence so a human can check it.
+when the negation governs the matched term itself: a negation word (no, ni, sin, cero, nada, nunca...)
+or phrase ("libre de") right before it, or separated from it only by a short chain of copulas,
+auxiliaries, articles or refusal verbs ("no es una réplica", "nunca ha sido reportado", "nada de
+imitaciones", "no acepto depósitos").  A negation of another word ("sin detalles réplica", "sin caja con
+iCloud") does not hide the term.  Guarantees phrased as conditions ("si no enciende te regreso tu
+dinero") are not admissions.  This keeps critical flags precise; anything ambiguous is reported with the
+matched terms as evidence so a human can check it.
 
 Codes and severities:
 
 ==================================  ========  ====================================================
 code                                severity  trigger
 ==================================  ========  ====================================================
-replica_or_counterfeit              critical  replica, clon, AAA, 1:1, generico, imitacion, ...
+replica_or_counterfeit              critical  replica, clon(e), AAA, 1:1, copia, fake, generico, ...
 box_or_parts_only                   critical  "solo caja", "caja vacia", for-parts cues
 locked_or_reported                  critical  iCloud/FRP/Google account lock, reported/blacklisted
 price_far_below_market              crit/warn total price < 35 % / < 55 % of comparable median
@@ -68,6 +72,20 @@ NEGATORS = frozenset(
     {"no", "ni", "sin", "cero", "nada", "nunca", "jamas", "not", "never", "without", "nor", "non"}
 )
 NEGATION_PHRASES = ("libre de", "libres de", "free of", "free from")
+# Words that may stand between a negator and the term it governs: copulas/auxiliaries ("no es replica",
+# "nunca ha sido reportado"), articles and "de" ("no es una replica", "nada de imitaciones") and the verbs
+# sellers use to refuse something ("no acepto depositos", "no se aceptan depositos", "no cuenta con icloud").
+NEGATION_LINKS = frozenset(
+    {
+        "es", "son", "sea", "esta", "estan", "fue", "ha", "han", "sido", "estado", "tiene", "tienen", "trae",
+        "presenta", "cuenta", "con", "de", "del", "la", "el", "los", "las", "un", "una", "se", "acepto",
+        "aceptamos", "acepta", "aceptan", "hago", "hacemos", "pido", "pedimos", "recibo", "recibimos", "manejo",
+        "manejamos", "maneja", "is", "are", "was", "has", "have", "been", "a", "an", "the", "of", "accept", "do",
+    }
+)
+MAX_NEGATION_LINKS = 3
+# "si no enciende te regreso tu dinero" is a guarantee, not an admission.
+CONDITIONAL_WORDS = frozenset({"si", "if"})
 # Words that, right before a counterfeit term, mean the *accessory/part* is generic, not the product.
 ACCESSORY_NOUNS = frozenset(
     {
@@ -76,6 +94,10 @@ ACCESSORY_NOUNS = frozenset(
         "tapa", "carcasa", "control", "controles", "eliminador", "cubo", "protector", "manual",
         "refaccion", "refacciones", "pieza", "piezas", "charger", "case", "battery", "screen",
     }
+)
+# Words that may follow the accessory noun before the counterfeit term ("mica de regalo generica").
+ACCESSORY_FILLERS = frozenset(
+    {"de", "regalo", "incluido", "incluida", "incluidos", "incluidas", "extra", "adicional", "adicionales"}
 )
 # Words that, before "compania", mean the phone is UNLOCKED (works with any carrier).
 CARRIER_FREE_WORDS = frozenset(
@@ -106,23 +128,44 @@ def _words_before(text: str, start: int, count: int) -> list[str]:
 
 
 def _is_negated(text: str, start: int) -> bool:
-    words = _words_before(text, start, 3)
-    if any(word in NEGATORS for word in words):
-        return True
-    joined = " ".join(words)
-    return any(phrase in joined for phrase in NEGATION_PHRASES)
+    """True when a negation governs the match: a negator (or "libre de") right before it, or separated
+    from it only by up to :data:`MAX_NEGATION_LINKS` link words.  "sin detalles replica" is NOT negated:
+    "sin" governs "detalles"."""
+    words = _words_before(text, start, MAX_NEGATION_LINKS + 2)
+    links = 0
+    for index in range(len(words) - 1, -1, -1):
+        word = words[index]
+        if word in NEGATORS:
+            return True
+        if index > 0 and f"{words[index - 1]} {word}" in NEGATION_PHRASES:
+            return True
+        if word not in NEGATION_LINKS or links == MAX_NEGATION_LINKS:
+            return False
+        links += 1
+    return False
+
+
+def _is_conditional(text: str, start: int) -> bool:
+    words = _words_before(text, start, 1)
+    return bool(words) and words[0] in CONDITIONAL_WORDS
 
 
 def _accessory_qualified(text: str, start: int, *, is_title: bool) -> bool:
-    """True when an accessory/part noun precedes the match ("cargador generico").
+    """True when an accessory/part noun precedes the match ("cargador generico", "mica de regalo
+    generica").  An accessory that is said to be missing ("sin caja replica") does not qualify.
 
     In a title the first word names the product itself ("Audifonos tipo original" sells headphones),
     so it never qualifies the match as being about an included accessory.
     """
-    words = _words_before(text, start, 2)
+    words = _words_before(text, start, 6)
     if is_title and len(text[:start].split()) <= len(words):
         words = words[1:]
-    return any(word in ACCESSORY_NOUNS for word in words)
+    while words and words[-1] in ACCESSORY_FILLERS:
+        words.pop()
+    return any(
+        words[index] in ACCESSORY_NOUNS and not (index > 0 and words[index - 1] in NEGATORS)
+        for index in range(max(0, len(words) - 2), len(words))
+    )
 
 
 @dataclass(frozen=True)
@@ -135,6 +178,8 @@ class _Term:
     accessory_aware: bool = False
     # Optional extra validation of the matched text.
     check: Callable[[str], bool] | None = None
+    # Ignored after "si"/"if": "si no enciende te regreso tu dinero" is a guarantee.
+    conditional_exempt: bool = False
 
 
 def _t(
@@ -144,8 +189,9 @@ def _t(
     negatable: bool = True,
     accessory_aware: bool = False,
     check: Callable[[str], bool] | None = None,
+    conditional_exempt: bool = False,
 ) -> _Term:
-    return _Term(label, re.compile(pattern), negatable, accessory_aware, check)
+    return _Term(label, re.compile(pattern), negatable, accessory_aware, check, conditional_exempt)
 
 
 def _is_mx_phone(matched: str) -> bool:
@@ -154,22 +200,53 @@ def _is_mx_phone(matched: str) -> bool:
     return len(digits) == 10 or (len(digits) == 12 and digits.startswith("52"))
 
 
+# "AAA"/"triple A" also name battery sizes ("pilas tipo AAA") and big-budget video games ("juegos AAA").
+_NOT_BATTERY_OR_GAME = (
+    r"(?<!pila )(?<!pilas )(?<!bateria )(?<!baterias )(?<!pila tipo )(?<!pilas tipo )(?<!bateria tipo )"
+    r"(?<!baterias tipo )(?<!juego )(?<!juegos )(?<!videojuego )(?<!videojuegos )(?<!titulo )(?<!titulos )"
+)
+_NOT_BATTERY_AFTER = r"(?!\s*(?:pila|bateria|batter))"
+_UNITS = r"(?:kg|kilos?|lbs?|cm|mm|mts?|metros?|m|lts?|litros?|l|gb|tb|mb|ghz|mhz|pulgadas|plg|ch)\b|\""
+_DOCUMENTS = (
+    r"(?:factura|ticket|nota|recibo|garantia|comprobante|seguridad|respaldo|identificacion|ine|documento|compra|guia"
+    r"|contrato|pedimento)s?"
+)
+
 REPLICA_TERMS = (
     _t("replica", r"\breplicas?\b", accessory_aware=True),
-    _t("clon", r"\bclon(?:es|ado|ada|ados|adas)?\b", accessory_aware=True),
-    _t("aaa", r"(?<!pila )(?<!pilas )(?<!bateria )(?<!baterias )(?<!tipo )\baaa\b(?!\s*(?:pila|bateria|batter))",
-       accessory_aware=True),
+    _t("clon", r"\bclon(?:e|es|ado|ada|ados|adas)?\b", accessory_aware=True),
+    _t("aaa", rf"{_NOT_BATTERY_OR_GAME}\baaa\b{_NOT_BATTERY_AFTER}", accessory_aware=True),
+    _t("triple a", rf"{_NOT_BATTERY_OR_GAME}\btriple a\b{_NOT_BATTERY_AFTER}", accessory_aware=True),
     _t("1:1", r"(?<![\d:])1 ?: ?1(?![\d:])", accessory_aware=True),
+    # "calidad 1.1" - but not versions ("USB 1.1") or measurements ("1.1 kg").
+    _t("1.1", rf"(?<![\w.,])(?<!usb )(?<!version )(?<!bluetooth )1\.1(?![\d.,])(?!\s*(?:{_UNITS}))",
+       accessory_aware=True),
+    # "copia exacta" - but not "copia de la factura".
+    _t("copia", rf"\bcopias?\b(?!\s+(?:de|del)\s+(?:(?:la|el|tu|su|mi)\s+)?{_DOCUMENTS}\b)", accessory_aware=True),
+    _t("calidad espejo", r"\bcalidad espejo\b", accessory_aware=True),
+    _t("fake", r"\bfakes?\b", accessory_aware=True),
     _t("generico", r"\bgeneric[oa]s?\b", accessory_aware=True),
     _t("imitacion", r"\bimitacion(?:es)?\b", accessory_aware=True),
     _t("tipo original", r"\btipo original\b", accessory_aware=True),
-    _t("similar a", r"\bsimilar(?:es)? al?\b", accessory_aware=True),
-    _t("no original", r"\bno (?:es |son )?original(?:es)?\b", negatable=False, accessory_aware=True),
-    _t("alternativo", r"\balternativ[oa]s?\b", accessory_aware=True),
+    # "similar a Jordan", "similar al original" - but not the condition "(estado) similar a nuevo".
+    _t("similar a",
+       r"(?<!estado )(?<!condicion )(?<!condiciones )\bsimilar(?:es)? al?\b"
+       r"(?!\s+(?:(?:un|uno|una|estar)\s+)?(?:nuev[oa]s?|new|estrenar)\b)",
+       accessory_aware=True),
+    _t("no original", r"\bno (?:es |son |sea )?(?:(?:al )?100 ?% |cien por ciento )?original(?:es)?\b",
+       negatable=False, accessory_aware=True, conditional_exempt=True),
+    # "consola alternativa" - but not "color alternativo" or "como alternativa (de pago)".
+    _t("alternativo",
+       r"(?<!color )(?<!colores )(?<!como )(?<!una )(?<!otra )(?<!forma )(?<!opcion )(?<!manera )(?<!pago )"
+       r"(?<!envio )(?<!entrega )\balternativ[oa]s?\b(?!\s+(?:de|para)\s+(?:pago|envio|entrega|contacto)\b)",
+       accessory_aware=True),
 )
 
 BOX_TERMS = (
-    _t("solo caja", r"\bsolo (?:la |el )?caja\b(?! (?:abierta|danada|maltratada|golpeada|rota|sellada))"),
+    # "PS5 solo caja" - but not the accessory list "incluye solo caja y cable".
+    _t("solo caja",
+       r"(?<!incluye )(?<!incluyo )(?<!incluimos )(?<!trae )(?<!viene con )"
+       r"\bsolo (?:la |el )?caja\b(?! (?:abierta|danada|maltratada|golpeada|rota|sellada))"),
     _t("caja vacia", r"\bcaja vacia\b"),
     _t("empty box", r"\bempty box\b"),
     _t("box only", r"\bbox only\b"),
@@ -179,7 +256,7 @@ BOX_TERMS = (
 PARTS_TERMS = (
     _t("para piezas", r"\bpara (?:piezas|partes)\b"),
     _t("refacciones", r"\b(?:para|como|solo) refaccion(?:es)?\b"),
-    _t("no enciende", r"\bno (?:enciende|prende)\b", negatable=False),
+    _t("no enciende", r"\bno (?:enciende|prende)\b", negatable=False, conditional_exempt=True),
     _t("display roto", r"\bdisplay (?:roto|estrellado|quebrado)\b"),
     _t("pantalla rota", r"\bpantalla (?:rota|estrellada|quebrada)\b"),
     _t("for parts", r"\b(?:for parts|parts only)\b"),
@@ -249,6 +326,8 @@ def _scan(texts: dict[str, str], terms: tuple[_Term, ...]) -> tuple[_TextHits, _
                     continue
                 if term.negatable and _is_negated(text, match.start()):
                     continue
+                if term.conditional_exempt and _is_conditional(text, match.start()):
+                    continue
                 if term.accessory_aware and _accessory_qualified(
                     text, match.start(), is_title=field_name == "title"
                 ):
@@ -263,9 +342,7 @@ def _scan_compania(texts: dict[str, str]) -> _TextHits:
     for field_name, text in texts.items():
         for match in _COMPANIA.finditer(text):
             words = _words_before(text, match.start(), 3)
-            if any(word in NEGATORS or word in CARRIER_FREE_WORDS for word in words):
-                continue
-            if any(phrase in " ".join(words) for phrase in NEGATION_PHRASES):
+            if any(word in CARRIER_FREE_WORDS for word in words) or _is_negated(text, match.start()):
                 continue
             hits.add("compania", field_name)
     return hits
