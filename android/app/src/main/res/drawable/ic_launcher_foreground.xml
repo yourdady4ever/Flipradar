@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Radar sweep + upward price arrow.  108dp adaptive-icon canvas, content kept inside the 66dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- outer ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3"
+        android:pathData="M54,27 A27,27 0 1,1 53.99,27 Z" />
+    <!-- inner ring -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#CFEFE2"
+        android:strokeWidth="2"
+        android:pathData="M54,40 A14,14 0 1,1 53.99,40 Z" />
+    <!-- sweep wedge -->
+    <path
+        android:fillColor="#66F2A541"
+        android:pathData="M54,54 L54,27 A27,27 0 0,1 77.38,40.5 Z" />
+    <!-- rising arrow -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#F2A541"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M38,66 L50,54 L58,60 L71,46" />
+    <path
+        android:fillColor="#F2A541"
+        android:pathData="M64,43 L74,43 L74,53 Z" />
+    <!-- centre dot -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,51 A3,3 0 1,1 53.99,51 Z" />
+</vector>

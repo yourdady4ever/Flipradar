@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FLIP RADAR is a SELF-HOSTED tool: most users run the backend on a home server / laptop and reach it
+  over the LAN (e.g. http://192.168.1.20:8000) where getting a trusted TLS certificate is impractical.
+  Cleartext HTTP is therefore permitted app-wide.
+
+  RISK: over http:// the API token and all data travel unencrypted.  On a trusted home LAN or a VPN
+  (WireGuard / Tailscale) this is acceptable; over the public internet it is NOT - anyone on the path
+  can steal the token.  The Setup screen warns whenever an http:// URL points to a non-private host.
+  Recommended for remote access: HTTPS via a reverse proxy (Caddy / nginx) or a VPN.
+
+  User-installed CAs are trusted in addition to system CAs so a self-signed / private-CA certificate
+  for your own server can be used (install the CA in Android settings).  Only add CAs you control.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

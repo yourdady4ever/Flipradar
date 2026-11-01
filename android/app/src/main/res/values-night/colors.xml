@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_primary_text">#5FD3A6</color>
+    <color name="profit_positive">#66BB6A</color>
+    <color name="profit_negative">#EF5350</color>
+    <color name="severity_warning_text">#FFB74D</color>
+    <color name="card_background">#1E2422</color>
+    <color name="card_stroke">#36403C</color>
+    <color name="error_text">#FF8A80</color>
+    <color name="error_background">#3B1F1F</color>
+    <color name="chart_axis">#A7B2AE</color>
+    <color name="window_background">#121614</color>
+</resources>

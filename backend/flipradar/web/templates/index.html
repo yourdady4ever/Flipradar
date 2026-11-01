@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta name="referrer" content="same-origin">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="FLIP RADAR - self-hosted resale opportunity dashboard for the Mexican market">
+  <title>FLIP RADAR</title>
+  <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+  <link rel="stylesheet" href="static/app.css">
+  <script type="module" src="static/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" id="skip-link" href="#main">Skip to main content</a>
+  <noscript><p class="noscript">The FLIP RADAR dashboard needs JavaScript. The HTTP API under /api/v1 works without it.</p></noscript>
+
+  <div id="boot" class="boot" role="status">Loading FLIP RADAR&hellip;</div>
+
+  <section id="login-view" class="login" aria-labelledby="login-title" hidden>
+    <form id="login-form" class="login-card" novalidate>
+      <div class="login-brand">
+        <img src="static/favicon.svg" alt="" width="44" height="44">
+        <div>
+          <h1 id="login-title">FLIP RADAR</h1>
+          <p class="muted small">Resale opportunities for the Mexican market (MXN)</p>
+        </div>
+      </div>
+      <p id="login-message" class="login-message" role="alert" hidden></p>
+      <div class="field">
+        <label for="login-token">API token</label>
+        <input id="login-token" name="token" type="password" autocomplete="off" spellcheck="false"
+               autocapitalize="off" required aria-describedby="login-token-hint">
+        <small id="login-token-hint" class="hint">Create one on the server with
+          <code>python -m flipradar create-token --name web</code>. The token is kept only in this browser
+          tab (sessionStorage) and sent as a Bearer header.</small>
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary" id="login-submit">Sign in</button>
+        <button type="button" class="btn btn-ghost" id="login-noauth">Continue without token</button>
+      </div>
+      <p class="muted small" id="login-server" aria-live="polite">Checking server&hellip;</p>
+    </form>
+  </section>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <button type="button" class="btn btn-ghost nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="sidenav">
+        <span class="hamburger" aria-hidden="true"></span><span class="sr-only">Menu</span>
+      </button>
+      <a class="brand" href="#/opportunities"><img src="static/favicon.svg" alt="" width="28" height="28"><span>FLIP RADAR</span></a>
+      <span class="topbar-spacer"></span>
+      <span id="server-info" class="server-info muted small"></span>
+      <button type="button" class="btn btn-ghost btn-sm" id="logout-btn">Log out</button>
+    </header>
+
+    <nav id="sidenav" class="sidenav" aria-label="Main">
+      <ul>
+        <li><a href="#/opportunities" data-route="opportunities">Opportunities</a></li>
+        <li><a href="#/calculator" data-route="calculator">Calculator</a></li>
+        <li><a href="#/inventory" data-route="inventory">Inventory</a></li>
+        <li><a href="#/analytics" data-route="analytics">Analytics</a></li>
+        <li><a href="#/sources" data-route="sources">Searches &amp; Sources</a></li>
+        <li><a href="#/alerts" data-route="alerts">Alerts</a></li>
+        <li><a href="#/notifications" data-route="notifications">Notifications <span id="unread-badge" class="nav-badge" hidden></span></a></li>
+        <li><a href="#/settings" data-route="settings">Settings</a></li>
+      </ul>
+      <p class="nav-note muted small">Every figure comes from collected listings or your own inputs. FLIP RADAR never invents prices or market statistics.</p>
+    </nav>
+
+    <main id="main" tabindex="-1"></main>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
+</body>
+</html>

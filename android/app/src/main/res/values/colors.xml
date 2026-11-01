@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand_primary">#0B6E4F</color>
+    <color name="brand_primary_dark">#08513A</color>
+    <color name="brand_accent">#F2A541</color>
+    <!-- Text tinted with the brand colour (lighter variant in night mode for contrast). -->
+    <color name="brand_primary_text">#0B6E4F</color>
+
+    <color name="profit_positive">#1B7F3B</color>
+    <color name="profit_negative">#C62828</color>
+    <!-- Badge backgrounds (white text on top) -->
+    <color name="profit_badge">#2E7D32</color>
+    <color name="severity_none">#607D8B</color>
+    <color name="severity_info">#1565C0</color>
+    <color name="severity_warning">#E65100</color>
+    <color name="severity_critical">#B71C1C</color>
+    <color name="severity_warning_text">#B34700</color>
+
+    <color name="card_background">#FFFFFF</color>
+    <color name="card_stroke">#DDE3E0</color>
+    <color name="error_text">#B00020</color>
+    <color name="error_background">#FDECEA</color>
+    <color name="chart_axis">#6B7672</color>
+    <color name="window_background">#F4F7F5</color>
+
+    <color name="ic_launcher_background">#0B6E4F</color>
+</resources>

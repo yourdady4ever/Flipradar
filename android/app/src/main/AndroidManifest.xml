@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FLIP RADAR Android client.
+  The package name comes from `namespace` in app/build.gradle.kts (Gradle builds) or is injected
+  into a temporary copy of this file by scripts/build-offline.sh (offline builds).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <application
+        android:name=".FlipRadarApp"
+        android:allowBackup="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.SetupActivity"
+            android:exported="false"
+            android:label="@string/setup_title"
+            android:windowSoftInputMode="adjustResize"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.OpportunitiesActivity"
+            android:exported="false"
+            android:label="@string/nav_opportunities"
+            android:windowSoftInputMode="stateHidden|adjustResize"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.OpportunityDetailActivity"
+            android:exported="false"
+            android:label="@string/opp_detail_title"
+            android:parentActivityName=".ui.OpportunitiesActivity" />
+
+        <activity
+            android:name=".ui.CalculatorActivity"
+            android:exported="false"
+            android:label="@string/nav_calculator"
+            android:windowSoftInputMode="stateHidden|adjustResize"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.InventoryActivity"
+            android:exported="false"
+            android:label="@string/nav_inventory"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.InventoryDetailActivity"
+            android:exported="false"
+            android:label="@string/inv_detail_title"
+            android:parentActivityName=".ui.InventoryActivity" />
+
+        <activity
+            android:name=".ui.DashboardActivity"
+            android:exported="false"
+            android:label="@string/nav_dashboard"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.SearchesActivity"
+            android:exported="false"
+            android:label="@string/nav_searches"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.AlertsActivity"
+            android:exported="false"
+            android:label="@string/nav_alerts"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.NotificationsActivity"
+            android:exported="false"
+            android:label="@string/nav_notifications"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <service
+            android:name=".notify.NotificationPollJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- Exported only so the system can deliver BOOT_COMPLETED (a protected broadcast);
+             onReceive ignores every other action. -->
+        <receiver
+            android:name=".notify.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

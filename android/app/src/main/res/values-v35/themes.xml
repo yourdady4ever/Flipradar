@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 15+ draws apps edge-to-edge (statusBarColor is ignored), so the status bar shows the light
+         window background: use dark status/navigation bar icons for contrast.  Night mode resolves to
+         values-night/themes.xml (the night qualifier takes precedence over v35) and keeps light icons. -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.Light.DarkActionBar">
+        <item name="android:colorPrimary">@color/brand_primary</item>
+        <item name="android:colorPrimaryDark">@color/brand_primary_dark</item>
+        <item name="android:colorAccent">@color/brand_primary</item>
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>
