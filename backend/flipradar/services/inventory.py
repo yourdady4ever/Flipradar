@@ -155,6 +155,11 @@ def create_from_opportunity(session: Session, opportunity_id: int, data: Opportu
     extra = data.extra_costs_cents
     if extra is None:
         extra = (shipping_mxn_cents(listing) or 0) if listing is not None else 0
+        # Estimated import duties (cross-border buys) are part of the cost of each unit bought.
+        lines = (opp.cost_breakdown_json or {}).get("acquisition_lines") or []
+        duties = next((int(line.get("amount_cents") or 0) for line in lines
+                       if isinstance(line, dict) and line.get("key") == "import_costs"), 0)
+        extra += max(0, duties) * data.quantity
     title = (listing.title if listing is not None else None) or (opp.product.title if opp.product else "Item")
     item = InventoryItem(
         title=title[:300],

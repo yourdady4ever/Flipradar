@@ -40,3 +40,12 @@ def test_ingestion_rejects_out_of_range_amounts():
     assert _validate(raw) == "amount is out of range"
     raw = RawListing(source_key="manual", external_id="a", title="X", price_cents=100, shipping_cents=MAX_CENTS + 1)
     assert _validate(raw) == "amount is out of range"
+
+
+def test_buying_imported_opportunity_includes_estimated_duties(api, db):
+    opp = fabricate_opportunity(db)
+    opp.cost_breakdown_json = {"acquisition_lines": [
+        {"key": "buy_price", "amount_cents": 1_000_000}, {"key": "import_costs", "amount_cents": 190_000}]}
+    db.commit()
+    item = api.post(f"/api/v1/opportunities/{opp.id}/buy", json={"quantity": 2}).json()
+    assert item["extra_costs_cents"] >= 2 * 190_000
