@@ -21,7 +21,7 @@ recommendation, without inventing data.
 | Profit calculator: commissions, fixed and shipping tiers, payment fees, IVA on fees, ISR/IVA withholdings, break-even, max buy price | ✅ tested |
 | Product normalization and equivalence: Spanish/English titles, GTIN, storage and variants, accessory and bundle detection | ✅ tested |
 | Opportunity engine: comparables, robust statistics, risk flags, demand evidence, 0–100 score, explanations | ✅ tested |
-| REST API (about 50 endpoints) with token auth, rate limiting and security headers | ✅ tested |
+| REST API (51 endpoints) with token auth, rate limiting and security headers | ✅ tested |
 | Web dashboard at `/`: opportunities, calculator, inventory, analytics, searches, alerts, notifications, settings | ✅ smoke-tested in Chromium |
 | Inventory and sales with average-cost basis, realized profit and analytics time series | ✅ tested |
 | Alerts, plus in-app, ntfy, Telegram and webhook notifications | ✅ tested (push channels with mocked HTTP) |
