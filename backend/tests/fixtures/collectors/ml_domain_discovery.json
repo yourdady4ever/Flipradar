@@ -1,0 +1,4 @@
+[
+  {"domain_id": "MLM-CELLPHONES", "domain_name": "Celulares y Smartphones", "category_id": "MLM1055", "category_name": "Celulares y Smartphones", "attributes": [{"id": "BRAND", "value_id": "9344", "value_name": "Apple"}]},
+  {"domain_id": "MLM-CELLPHONE_COVERS", "domain_name": "Fundas para celulares", "category_id": "MLM3503", "category_name": "Fundas", "attributes": []}
+]

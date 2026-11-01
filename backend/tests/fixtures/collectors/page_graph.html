@@ -1,0 +1,24 @@
+<html><head>
+<script type="application/ld+json; charset=utf-8">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {"@type": "WebSite", "@id": "https://store.example.mx/#website", "name": "Store"},
+    {"@type": "WebPage", "@id": "https://store.example.mx/p/1#webpage"},
+    {
+      "@type": ["Product", "schema:Thing"],
+      "@id": "https://store.example.mx/p/1#product",
+      "name": "Nintendo Switch OLED Blanco",
+      "brand": {"@type": "Brand", "name": "Nintendo"},
+      "gtin12": "045496883386",
+      "image": {"@type": "ImageObject", "url": "https://store.example.mx/img/switch.jpg"},
+      "offers": [
+        {"@type": "Offer", "price": "7299.00", "priceCurrency": "MXN", "availability": "https://schema.org/OutOfStock"},
+        {"@type": "Offer", "price": "6,899.00", "priceCurrency": "MXN", "availability": "https://schema.org/InStock", "itemCondition": "https://schema.org/UsedCondition"},
+        {"@type": "Offer", "price": "6500.00", "priceCurrency": "MXN", "availability": "https://schema.org/SoldOut"}
+      ]
+    }
+  ]
+}
+</script>
+</head><body></body></html>

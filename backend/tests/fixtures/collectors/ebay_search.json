@@ -1,0 +1,52 @@
+{
+  "href": "https://api.ebay.com/buy/browse/v1/item_summary/search?q=iphone&limit=50",
+  "total": 4,
+  "limit": 50,
+  "offset": 0,
+  "itemSummaries": [
+    {
+      "itemId": "v1|123456789012|0",
+      "title": "Apple iPhone 15 128GB Black Unlocked",
+      "price": {"value": "529.99", "currency": "USD"},
+      "condition": "Used",
+      "conditionId": "3000",
+      "itemWebUrl": "https://www.ebay.com/itm/123456789012",
+      "image": {"imageUrl": "https://i.ebayimg.com/images/g/abc/s-l225.jpg"},
+      "seller": {"username": "gadget_seller", "feedbackPercentage": "99.6", "feedbackScore": 4821},
+      "shippingOptions": [{"shippingCostType": "FIXED", "shippingCost": {"value": "35.50", "currency": "USD"}}],
+      "itemLocation": {"postalCode": "330**", "country": "US"},
+      "buyingOptions": ["FIXED_PRICE", "BEST_OFFER"],
+      "epid": "28059384956",
+      "gtin": "0195949036187"
+    },
+    {
+      "itemId": "v1|222222222222|0",
+      "title": "Apple iPhone 15 128GB Blue NEW Sealed",
+      "price": {"value": "699.00", "currency": "USD"},
+      "condition": "New",
+      "conditionId": "1000",
+      "itemWebUrl": "https://www.ebay.com/itm/222222222222",
+      "seller": {"username": "phones_usa", "feedbackPercentage": "100.0", "feedbackScore": 120},
+      "shippingOptions": [{"shippingCostType": "FIXED", "shippingCost": {"value": "0.00", "currency": "USD"}}],
+      "itemLocation": {"country": "US"},
+      "buyingOptions": ["FIXED_PRICE"]
+    },
+    {
+      "itemId": "v1|333333333333|0",
+      "title": "iPhone 15 auction",
+      "price": {"value": "100.00", "currency": "USD"},
+      "condition": "Used",
+      "itemWebUrl": "https://www.ebay.com/itm/333333333333",
+      "buyingOptions": ["AUCTION"]
+    },
+    {
+      "itemId": "v1|444444444444|0",
+      "title": "iPhone 15 shipping in other currency",
+      "price": {"value": "610", "currency": "USD"},
+      "condition": "Open box",
+      "itemWebUrl": "https://www.ebay.com/itm/444444444444",
+      "shippingOptions": [{"shippingCostType": "CALCULATED", "shippingCost": {"value": "40.00", "currency": "EUR"}}],
+      "buyingOptions": ["FIXED_PRICE"]
+    }
+  ]
+}

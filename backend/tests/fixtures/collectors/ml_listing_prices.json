@@ -1,0 +1,16 @@
+[
+  {
+    "listing_type_id": "gold_special",
+    "listing_type_name": "Clásica",
+    "currency_id": "MXN",
+    "sale_fee_amount": 2015.0,
+    "sale_fee_details": {"percentage_fee": 15.5, "fixed_fee": 0, "gross_amount": 2015.0, "financing_add_on_fee": 0, "meli_percentage_fee": 15.5}
+  },
+  {
+    "listing_type_id": "gold_pro",
+    "listing_type_name": "Premium",
+    "currency_id": "MXN",
+    "sale_fee_amount": 2535.0,
+    "sale_fee_details": {"percentage_fee": 19.5, "fixed_fee": 25, "gross_amount": 2535.0, "financing_add_on_fee": 4, "meli_percentage_fee": 15.5}
+  }
+]

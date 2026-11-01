@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Ofertas de ejemplo</title>
+    <link>https://deals.example.com/</link>
+    <description>Feed de prueba</description>
+    <item>
+      <title>Consola PS5 Slim Digital $7,999 en Liverpool</title>
+      <link>https://deals.example.com/oferta/1</link>
+      <guid isPermaLink="false">deal-1</guid>
+      <pubDate>Thu, 30 Oct 2026 18:30:00 -0600</pubDate>
+      <description><![CDATA[<p>Precio mínimo histórico. <b>Nueva y sellada</b>.</p><script>alert(1)</script>]]></description>
+      <category domain="merchant">Liverpool</category>
+      <category>Videojuegos</category>
+    </item>
+    <item>
+      <title>Audífonos Sony WH-1000XM5 antes $8,999 ahora $5,999</title>
+      <link>https://deals.example.com/oferta/2</link>
+      <guid>deal-2</guid>
+      <pubDate>Thu, 30 Oct 2026 12:00:00 -0600</pubDate>
+      <description>Descuento con tarjeta</description>
+    </item>
+    <item>
+      <title>Cámara Sony Alpha a6400 kit</title>
+      <link>https://deals.example.com/oferta/3</link>
+      <guid>deal-3</guid>
+      <description>&lt;p&gt;Ahora en MXN 15,499.00 con envío gratis&lt;/p&gt;</description>
+      <merchant>Tienda Foto</merchant>
+    </item>
+    <item>
+      <title>Nuevo precio mínimo: Kindle Paperwhite 1 999 pesos</title>
+      <link>https://deals.example.com/oferta/4</link>
+      <guid>deal-4</guid>
+      <dc:date>2026-10-29T10:00:00Z</dc:date>
+    </item>
+    <item>
+      <title>Laptop gamer desde $14,999</title>
+      <link>https://deals.example.com/oferta/5</link>
+      <guid>deal-5</guid>
+    </item>
+    <item>
+      <title>Nintendo Switch OLED $259 USD</title>
+      <link>https://deals.example.com/oferta/6</link>
+      <guid>deal-6</guid>
+    </item>
+  </channel>
+</rss>

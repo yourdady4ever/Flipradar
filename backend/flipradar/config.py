@@ -57,15 +57,28 @@ class Settings(BaseSettings):
     ml_api_base: str = "https://api.mercadolibre.com"
     ml_site_id: str = "MLM"
 
+    # Enrich catalog listings with public seller reputation (max 20 sellers per search).
+    ml_enrich_sellers: bool = True
+
     # --- eBay Browse API (official, free developer program) --------------------------------------
     ebay_client_id: str | None = None
     ebay_client_secret: str | None = None
     ebay_api_base: str = "https://api.ebay.com"
     ebay_marketplace_id: str = "EBAY_US"
+    # Safety margin below eBay's default 5,000 Browse calls/day per application.
+    ebay_daily_call_limit: int = 4500
 
     # --- Banco de Mexico SIE API (free token) ------------------------------------------------------
     banxico_token: str | None = None
     banxico_api_base: str = "https://www.banxico.org.mx/SieAPIRest/service/v1"
+    # Key-less public FX fallbacks (labelled as estimates; ExchangeRate-API requires attribution).
+    fx_public_sources_enabled: bool = True
+    frankfurter_api_base: str = "https://api.frankfurter.dev/v1"
+    exchangerate_api_url: str = "https://open.er-api.com/v6/latest/USD"
+
+    # --- single-URL JSON-LD check ------------------------------------------------------------------
+    # Extra TCP ports allowed for user-initiated URL checks (comma separated; 80/443 always allowed).
+    url_check_allowed_ports: str = ""
 
     # --- RSS deal feeds ---------------------------------------------------------------------------
     # Comma separated list of RSS/Atom feed URLs to poll (e.g. a deal community feed you are allowed

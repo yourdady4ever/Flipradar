@@ -1,0 +1,15 @@
+{
+  "paging": {"total": 1, "offset": 0, "limit": 20},
+  "results": [
+    {
+      "item_id": "MLM444555666",
+      "price": 15499.5,
+      "currency_id": "MXN",
+      "seller_id": 111,
+      "condition": "new",
+      "listing_type_id": "gold_special",
+      "shipping": {"free_shipping": true},
+      "category_id": "MLM1055"
+    }
+  ]
+}

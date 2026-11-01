@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom deals</title>
+  <id>urn:uuid:feed</id>
+  <updated>2026-10-31T09:00:00Z</updated>
+  <entry>
+    <title type="html">iPhone 15 128 GB (Nuevo) a $13,499.50 MXN</title>
+    <link rel="alternate" href="https://atom.example.org/deals/iphone-15"/>
+    <link rel="enclosure" href="https://atom.example.org/img/iphone.jpg"/>
+    <id>tag:atom.example.org,2026:deal-100</id>
+    <published>2026-10-31T08:00:00Z</published>
+    <updated>2026-10-31T08:30:00Z</updated>
+    <summary type="html">&lt;p&gt;Envío incluido&lt;/p&gt;</summary>
+    <category term="Celulares"/>
+  </entry>
+  <entry>
+    <title>Smart TV 55 pulgadas</title>
+    <link href="https://atom.example.org/deals/tv"/>
+    <id>tag:atom.example.org,2026:deal-101</id>
+    <updated>2026-10-31T07:00:00Z</updated>
+    <content type="html">&lt;p&gt;Sin precio publicado&lt;/p&gt;</content>
+  </entry>
+</feed>

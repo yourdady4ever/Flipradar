@@ -1,0 +1,39 @@
+{
+  "paging": {"total": 3, "offset": 0, "limit": 20},
+  "results": [
+    {
+      "item_id": "MLM123456789",
+      "price": 12999.99,
+      "original_price": 15999,
+      "currency_id": "MXN",
+      "seller_id": 111,
+      "condition": "new",
+      "listing_type_id": "gold_special",
+      "shipping": {"free_shipping": true, "logistic_type": "fulfillment", "mode": "me2"},
+      "category_id": "MLM1055",
+      "official_store_id": null,
+      "warranty": "Garantía del vendedor: 3 meses",
+      "tags": ["good_quality_thumbnail"]
+    },
+    {
+      "item_id": "MLM987654321",
+      "price": 13499,
+      "currency_id": "MXN",
+      "seller_id": 222,
+      "condition": "used",
+      "listing_type_id": "gold_pro",
+      "shipping": {"free_shipping": false, "logistic_type": "drop_off"},
+      "category_id": "MLM1055",
+      "official_store_id": 3456
+    },
+    {
+      "item_id": "MLM555",
+      "price": null,
+      "currency_id": "MXN",
+      "seller_id": 333,
+      "condition": "new",
+      "listing_type_id": "gold_special",
+      "category_id": "MLM1055"
+    }
+  ]
+}

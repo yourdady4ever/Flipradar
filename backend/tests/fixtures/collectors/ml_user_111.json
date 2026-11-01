@@ -1,0 +1,17 @@
+{
+  "id": 111,
+  "nickname": "TIENDA_EJEMPLO",
+  "registration_date": "2015-03-02T10:11:12.000-04:00",
+  "country_id": "MX",
+  "seller_reputation": {
+    "level_id": "5_green",
+    "power_seller_status": "platinum",
+    "transactions": {
+      "period": "historic",
+      "total": 15234,
+      "completed": 14980,
+      "canceled": 254,
+      "ratings": {"positive": 0.97, "neutral": 0.01, "negative": 0.02}
+    }
+  }
+}

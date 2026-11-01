@@ -1,0 +1,32 @@
+{
+  "keywords": "iphone 15",
+  "paging": {"total": 2, "offset": 0, "limit": 2},
+  "results": [
+    {
+      "id": "MLM27172623",
+      "status": "active",
+      "domain_id": "MLM-CELLPHONES",
+      "name": "Apple iPhone 15 (128 GB) - Negro",
+      "attributes": [
+        {"id": "BRAND", "name": "Marca", "value_id": "9344", "value_name": "Apple"},
+        {"id": "MODEL", "name": "Modelo", "value_id": "1", "value_name": "iPhone 15"},
+        {"id": "GTIN", "name": "Código universal de producto", "value_name": "0195949036187"},
+        {"id": "INTERNAL_MEMORY", "name": "Memoria interna", "value_name": "128 GB"},
+        {"id": "COLOR", "name": "Color", "value_name": null}
+      ],
+      "pictures": [{"id": "pic1", "url": "https://http2.mlstatic.com/D_NQ_NP_123-F.jpg"}]
+    },
+    {
+      "id": "MLM99887766",
+      "status": "active",
+      "domain_id": "MLM-CELLPHONES",
+      "name": "Apple iPhone 15 (256 GB) - Azul",
+      "attributes": [
+        {"id": "BRAND", "value_name": "Apple"},
+        {"id": "MODEL", "value_name": "iPhone 15"},
+        {"id": "GTIN", "value_name": "123"}
+      ],
+      "pictures": []
+    }
+  ]
+}
