@@ -103,6 +103,9 @@ class ListingView:
     sold_quantity: int | None = None
     is_demo: bool = False
     attributes: dict[str, Any] = field(default_factory=dict)
+    # False for listings that are only BUY-side evidence (e.g. eBay US, retail deal feeds, single retailer
+    # pages): they can be purchase candidates but never define the Mexican resale price.
+    resale_reference: bool = True
 
 
 @dataclass
