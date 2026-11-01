@@ -36,6 +36,9 @@ TOKEN=$(../.venv/bin/python -m flipradar create-token --name e2e | tail -1)
 FLIPRADAR_URL=http://127.0.0.1:8765 FLIPRADAR_TOKEN=$TOKEN FLIPRADAR_SMOKE_MUTATE=1 node tests/web_smoke/smoke.mjs
 bash ../android/scripts/run-contract-check.sh http://127.0.0.1:8765 "$TOKEN"
 kill %1
+# dashboard pure-function tests and mock-server smoke (no backend needed)
+node --test tests/web_smoke/*.test.mjs && NODE_PATH=$(npm root -g) node tests/web_smoke/run_mock.mjs
+# (the live checks above make about 200 requests: run the server with FLIPRADAR_RATE_LIMIT_PER_MINUTE=5000)
 # 3. Android
 bash ../android/scripts/run-unit-tests.sh && bash ../android/scripts/build-offline.sh
 # 4. regenerate API docs if the API changed
@@ -91,8 +94,9 @@ The schema is created with `create_all()`, which only adds **new tables**. It do
 columns to existing tables. For a column change on a deployed database, either:
 * add Alembic (`pip install alembic`, `alembic init`, point `target_metadata` at
   `flipradar.db.Base.metadata`, and autogenerate a baseline revision before your change), or
-* for small changes, run an `ALTER TABLE ... ADD COLUMN ...` once in a `services/bootstrap.py` step
-  guarded by `PRAGMA table_info`.
+* for small additive changes, add the column to `services/bootstrap.ensure_added_columns`. It runs
+  `ALTER TABLE ... ADD COLUMN` when `PRAGMA table_info` shows the column is missing, which is how
+  `inventory_items.written_off_at` was added.
 
 Back up `backend/data/flipradar.db` first.
 
@@ -113,6 +117,10 @@ shared store.
   is shown but does not hide the deal.
 * **No scraping behind anti-bot protection, and no bypassing API policy blocks.** See `docs/DATA_SOURCES.md`.
 * **AI output is validated against facts,** and is discarded if it contains an unknown number.
+* **Inventory accounting:** cost basis is allocated cumulatively, so the sale that empties an item
+  takes the rounding remainder. Unit or extra costs can't be edited once an item has sales (409); use
+  a sale's `other_costs_cents`. Written-off stock is a realized loss, while `returned` means refunded.
+* **No write transaction across an await,** because of the SQLite single-writer lock. See ARCHITECTURE.md.
 * **The Android app uses only framework APIs,** so it builds without Google Maven. Adding AndroidX
   would break `build-offline.sh`. If you do add it, keep the Gradle build as the only path and update
   CI and the docs.

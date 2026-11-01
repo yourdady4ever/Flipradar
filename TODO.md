@@ -21,6 +21,17 @@ Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3*
 
 ## P2: product improvements
 
+- [ ] **Recover matching recall safely.** Listings that omit storage, PS5/Xbox edition or the screen size
+  of multi-size lines are deliberately not clustered (precision first). Add user-confirmed defaults per
+  product family (for example "PS5 Slim 1TB without 'digital' = standard edition") and a "needs review"
+  queue in the dashboard to assign such listings by hand.
+- [ ] **Category name from Mercado Libre.** Pass `category_name` from the catalog API (domain name) into
+  `RawListing`, so the normalizer's accessory-category guard can fire.
+- [ ] **`formal_import_required` in `ImportCostOut`.** Expose this flag, make duties nullable when they
+  are not estimated, and disable the dashboard's "Use duties" button in that case.
+- [ ] **`sqlite_autoincrement` on `notifications`,** so ids are never reused after deletes. The
+  Android poller no longer depends on this.
+
 - [ ] **ML fee lookup in analysis.** When a token is configured, use `/sites/MLM/listing_prices`
   (already implemented in `MercadoLibreCollector.get_listing_fee`) to replace the profile's
   commission with the exact per-category rate. Cache the rate per category.

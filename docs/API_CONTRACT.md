@@ -68,6 +68,14 @@ Header row required.  Columns (case-insensitive): `title` (required), `price` (r
 `external_id` (default: hash of url/title), `brand`, `model`, `gtin`, `seller`, `location`, `sold_quantity`,
 `available_quantity`, `observed_at` (ISO date).  Max 5 MB / 20 000 rows.
 
+Amounts: in `,`-delimited files use `.` for decimals (`12999.00`, `$12,999`, `1,234.50`); in
+`;`-delimited files (decimal-comma spreadsheets) `1.234,50` / `12999,00` are also accepted.  Ambiguous
+values (`12,50` in a `,` file, `1,234` in a `;` file), amounts above 10^12 centavos and cells longer than
+2,000 characters reject only their row (reported in `errors`).
+
+Notifications: `since_id=0` returns the newest `limit` rows; `since_id=N>0` returns the OLDEST `limit`
+rows with id > N (listed newest first), so a poller never skips notifications.
+
 ## Web dashboard
 
 `GET /` serves the single-page dashboard (static HTML/JS, no external CDN).  The dashboard asks for

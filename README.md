@@ -76,6 +76,11 @@ FLIPRADAR_BANXICO_TOKEN=...
 # FLIPRADAR_TELEGRAM_BOT_TOKEN=...
 # FLIPRADAR_TELEGRAM_CHAT_ID=...
 
+# Behind a reverse proxy: trust X-Forwarded-For only from these peers (IPs/CIDRs)
+# FLIPRADAR_TRUSTED_PROXIES=127.0.0.1
+# Only with FLIPRADAR_REQUIRE_AUTH=false: extra Host names accepted (e.g. 10.0.2.2 for the Android emulator)
+# FLIPRADAR_ALLOWED_HOSTS=10.0.2.2
+
 # Optional local AI summaries (https://ollama.com) - off by default
 # FLIPRADAR_LLM_PROVIDER=ollama
 # FLIPRADAR_LLM_MODEL=llama3.1:8b

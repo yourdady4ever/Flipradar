@@ -78,27 +78,38 @@ existing deployment, see `CONTINUATION.md` § "Schema changes".
    with critical risk flags. Each seller counts once. Outliers with robust z > 3.5 are removed. Every
    exclusion is counted and reported. Resale statistics use the **item price**: buyer-paid shipping
    is not seller revenue, and seller-paid shipping is charged by the fee profile.
-2. **Resale price estimate.** If at least `min_comparables` sold observations exist, their median
+2. **Buy candidates.** Only active listings seen within `buy_max_age_days` (default 3) qualify.
+   Opportunities whose buy listing went stale are expired on every recompute. Listings shipped from
+   abroad (for example eBay US) get an estimated Mexican import cost from the courier rules in
+   `finance/import_costs.py`, converted at the listing's stored FX rate. That cost is charged as an
+   acquisition cost and is shown in the explanation. If the rule says a formal import is required, or
+   the currency can't be estimated, no opportunity is created.
+3. **Resale price estimate.** If at least `min_comparables` sold observations exist, their median
    is used. Otherwise the `competitive` strategy uses the 25th percentile of competing asking prices
    (the price at which you would need to list to sell), and the `market` strategy uses the median.
-3. **Profit** (`finance/calculator.py`). The resale fee profile is chosen by the condition of the
+4. **Profit** (`finance/calculator.py`). The resale fee profile is chosen by the condition of the
    unit being bought: `default_fee_profile_key` for new and refurbished units,
    `default_fee_profile_key_used` for used units. Mercado Libre charges different shipping tiers and
    withholds tax only on new items. The profile supplies commission, fixed or shipping tiers, payment
    fees, IVA on fees, seller-paid shipping above the free-shipping threshold, and ISR/IVA withholdings. The calculator also returns the break-even sale price and the maximum
    buy price for the target ROI.
-4. **Risk** (`engine/risk.py`). Deterministic rules flag: replica wording, box or parts only, locked
+5. **Risk** (`engine/risk.py`). Deterministic rules flag: replica wording, box or parts only, locked
    or reported devices, prices far below market (below 55 % of the median is a warning, below 35 % is
    critical), off-platform payment or contact, new or poorly-rated sellers, unknown shipping, low
    match confidence, and statistical outliers (informational only). **Suspicious** means a critical
    flag or 2+ warnings (`engine.risk.is_suspicious`). Suspicious opportunities are hidden by default
    and excluded from alerts.
-5. **Demand** (`engine/demand.py`). Uses `sold_quantity` deltas over time and listings observed as
-   sold. Supply counts are informational only. With no evidence, demand is `unknown`.
-6. **Score** (`engine/scoring.py`). A score from 0 to 100 is built from ROI (30), absolute profit (20),
+6. **Demand** (`engine/demand.py`). Evidence comes from the candidate's own condition class and from
+   Mexican resale-market listings only. It uses `sold_quantity` deltas over time and listings observed
+   as sold. Supply counts are informational only. With no evidence, demand is `unknown`. Confidence
+   comes from the evidence that set the level.
+7. **Score** (`engine/scoring.py`). A score from 0 to 100 is built from ROI (30), absolute profit (20),
    price-evidence quality (20), match confidence (10) and demand (10), minus risk penalties. A
    confidence level (high / medium / low) comes with it.
-7. **Explanation** (`engine/explain.py`). A facts dictionary and a sectioned plain-text explanation.
+8. **Explanation** (`engine/explain.py`). A facts dictionary and a sectioned plain-text explanation.
+9. **Persistence** (`services/analysis.py`). Opportunities are upserted per buy listing. User
+   statuses (seen/watching/dismissed/bought) survive recomputes and fee-profile changes. A bought
+   opportunity cannot be reopened while an inventory item references it.
 
 ## Product equivalence (normalize/, matching/)
 
@@ -111,7 +122,12 @@ OLED/Lite, Wi-Fi/cellular), condition, accessories and bundles. Clustering tries
 3. **Guarded fuzzy match** (rapidfuzz). Used only when brand and model already match and storage and
    variants do not conflict.
 
-Accessories never share a cluster with devices.
+Accessories never share a cluster with devices. Precision comes first: a listing is **not clustered**
+when it omits an attribute that changes the price, such as storage, PS5/Xbox edition or the screen
+size of a multi-size line. The same applies when it contradicts itself (for example two Apple Watch
+case materials), negates a variant ("no es OLED"), or names an accessory, game or part after the
+device. A GTIN never pulls a listing into a less specific product. This costs some recall; see
+`TODO.md`.
 
 ## Interfaces
 
@@ -131,6 +147,10 @@ Accessories never share a cluster with devices.
 ## Concurrency model
 
 There is one process. FastAPI routes and the scheduler run on one asyncio loop. Collectors are async
-(httpx). Database access goes through synchronous SQLAlchemy sessions with SQLite in WAL mode. This is
+(httpx). Database access goes through synchronous SQLAlchemy sessions with SQLite in WAL mode.
+**No write transaction is held across a network await.** A collection run commits its run row first,
+calls the collector, and then ingests in one short transaction on a worker thread. Push notifications
+are sent first, and their delivery status is written afterwards. Stock decrements are atomic
+(`UPDATE ... WHERE quantity_available >= n`). This is
 appropriate for a single user or a small team. To scale beyond that, see `CONTINUATION.md`, which
 covers moving to PostgreSQL and a separate worker.
