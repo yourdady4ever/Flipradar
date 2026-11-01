@@ -133,3 +133,23 @@ def test_real_listings_never_join_demo_clusters(db, settings):
     stats = _load(db, [raw("REAL1", "Apple iPhone 15 Pro 256GB", 15000)])
     product = db.get(Product, next(iter(stats.product_ids_touched)))
     assert not product.canonical_key.startswith("demo|")
+
+
+def test_one_failing_product_does_not_abort_recompute(db, settings, monkeypatch):
+    from flipradar.engine import opportunities as opp_engine
+
+    _load(db)
+    _load(db, [raw(f"S{i}", f"Galaxy S24 usado {i}", p, brand="samsung", model="galaxy s24")
+               for i, p in enumerate([10000, 10200, 9900, 10100, 6000])])
+    real = opp_engine.analyze_product
+
+    def flaky(product_key, *args, **kwargs):
+        if product_key.startswith("apple"):
+            raise RuntimeError("engine bug")
+        return real(product_key, *args, **kwargs)
+
+    monkeypatch.setattr(opp_engine, "analyze_product", flaky)
+    result = analysis.recompute(db, settings=settings)
+    assert result.products_analyzed == 2 and result.opportunities_created == 1
+    created = db.scalars(select(Opportunity)).one()
+    assert created.buy_listing.external_id == "S4"

@@ -52,16 +52,16 @@ export function scaledToDecimal(value, decimals = 2) {
  * "1234.5" -> 123450, "1,234.50" -> 123450, "$99" -> 9900, "" -> null.  Throws Error on bad input.
  */
 export function parseScaled(raw, decimals = 2, { allowNegative = false } = {}) {
-  let s = String(raw ?? '').trim().replace(/\s+/g, '');
-  s = s.replace(/^(-?)\$/, '$1').replace(/(mxn|usd)$/i, '');
-  if (s === '') return null;
-  if (s.includes(',')) {
-    if (!/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) {
+  let text = String(raw ?? '').trim().replace(/\s+/g, '');
+  text = text.replace(/^(-?)\$/, '$1').replace(/(mxn|usd)$/i, '');
+  if (text === '') return null;
+  if (text.includes(',')) {
+    if (!/^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(text)) {
       throw new Error('use "." for decimals and "," only as a thousands separator');
     }
-    s = s.replace(/,/g, '');
+    text = text.replace(/,/g, '');
   }
-  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(s);
+  const m = /^(-?)(\d*)(?:\.(\d*))?$/.exec(text);
   if (!m || (m[2] === '' && !m[3])) throw new Error('not a valid number');
   if (m[1] && !allowNegative) throw new Error('must not be negative');
   const frac = m[3] || '';
@@ -198,7 +198,7 @@ export function niceStep(rawStep) {
 
 /** Integer-only axis ticks over centavo values; always includes 0.  Steps are whole pesos when the range allows. */
 export function axisTicks(minCents, maxCents, count = 5) {
-  let lo = Math.min(0, minCents);
+  const lo = Math.min(0, minCents);
   let hi = Math.max(0, maxCents);
   if (lo === hi) hi = lo + 10000;
   const range = hi - lo;
@@ -994,11 +994,11 @@ function renderScore(components, score) {
     const ratio = max > 0 ? Math.min(1, Math.abs(pts) / max) : (pts !== 0 ? 1 : 0);
     const fill = h('span', { class: ['bar-fill', pts < 0 && 'neg'] });
     fill.style.width = `${(ratio * 100).toFixed(1)}%`;
-    const measured = c.raw_value === null || c.raw_value === undefined ? '' : ` (measured value: ${fmtValue('', c.raw_value)})`;
+    // raw_value is shown only via the explanation text: its unit (centavos, fraction, count) differs per component.
     return h('li', null,
       h('div', { class: 'score-row' }, h('span', null, c.label), h('span', { class: ['score-pts', pts < 0 && 'neg'] }, `${pts > 0 ? '+' : ''}${fmtScore(pts)} / ${fmtScore(max)}`)),
       h('span', { class: 'bar', 'aria-hidden': 'true' }, fill),
-      h('p', { class: 'muted small' }, c.explanation || '', measured));
+      h('p', { class: 'muted small' }, c.explanation || ''));
   }));
   return h('div', null, h('p', null, `Total score ${fmtScore(score)} / 100 is the sum of these deterministic components:`), list);
 }
@@ -1149,6 +1149,7 @@ function OpportunitiesView(main, initialRoute) {
     const items = Array.isArray(page.items) ? page.items : [];
     if (!items.length) {
       setChildren(results, oppEmptyState(isFiltered() || oppState.offset > 0));
+      if (!oppState.include_suspicious && oppState.offset === 0) showHiddenSuspicious();
     } else {
       setChildren(results, table([
         { label: 'Title', cls: 'title-cell', cell: (o) => [h('a', { href: `#/opportunities/${o.id}`, class: 'row-link' }, o.buy_title), o.is_demo ? [' ', demoBadge()] : null, h('div', { class: 'sub muted' }, o.product_title)] },
@@ -1184,6 +1185,29 @@ function OpportunitiesView(main, initialRoute) {
       h('span', { class: 'pager-buttons' },
         button('← Previous', () => { oppState.offset = Math.max(0, oppState.offset - oppState.limit); return load(); }, { small: true, attrs: { disabled: oppState.offset <= 0 } }),
         button('Next →', () => { oppState.offset += oppState.limit; return load(); }, { small: true, attrs: { disabled: to >= total } })));
+  }
+
+  // An empty list can still hide opportunities whose buy listing was flagged suspicious (they are excluded by
+  // default).  Say so explicitly instead of claiming there is nothing.
+  async function showHiddenSuspicious() {
+    try {
+      const probe = await api('/opportunities', { query: { ...query(), include_suspicious: 'true', limit: 1, offset: 0 } });
+      if (!alive() || !probe || !probe.total || oppState.include_suspicious) return;
+      const box = results.querySelector('.empty');
+      if (!box) return;
+      const heading = box.querySelector('h2');
+      if (heading) heading.textContent = 'Only suspicious opportunities found';
+      box.prepend(h('div', { class: 'notice notice-warn hidden-suspicious', role: 'status' },
+        h('p', null, `${fmtInt(probe.total)} opportunit${probe.total === 1 ? 'y is' : 'ies are'} hidden because the buy listing was flagged as suspicious (for example a price far below the market, replica wording or off-platform payment). Review the risk flags before trusting them.`),
+        button('Show suspicious opportunities', () => {
+          oppState.include_suspicious = true;
+          inputOf(form, 'include_suspicious').checked = true;
+          oppState.offset = 0;
+          return load();
+        }, { small: true, kind: 'primary' })));
+    } catch {
+      /* the main list already rendered; this hint is optional */
+    }
   }
 
   async function load() {
@@ -1334,10 +1358,10 @@ function createOppDrawer({ onChanged }) {
   }
 
   function render(d) {
-    const setOpen = (open) => {
-      bf.hidden = !open;
-      buyToggle.setAttribute('aria-expanded', String(open));
-      if (open) inputOf(bf, 'quantity').focus();
+    const setOpen = (isOpen) => {
+      bf.hidden = !isOpen;
+      buyToggle.setAttribute('aria-expanded', String(isOpen));
+      if (isOpen) inputOf(bf, 'quantity').focus();
       else buyToggle.focus();
     };
     const bf = buyForm(d, setOpen);
@@ -1536,7 +1560,7 @@ const INV_STATUSES = ['purchased', 'in_transit', 'in_stock', 'listed', 'sold', '
 const INV_EDITABLE_STATUSES = ['purchased', 'in_transit', 'in_stock', 'listed', 'returned', 'written_off'];
 const CONDITIONS = ['new', 'used', 'refurbished', 'for_parts', 'unknown'];
 const invState = { status: '', q: '', offset: 0, limit: 100 };
-const label = (s) => String(s).replace(/_/g, ' ');
+const label = (value) => String(value).replace(/_/g, ' ');
 
 function InventoryView(main, initialRoute) {
   const alive = mountGuard();

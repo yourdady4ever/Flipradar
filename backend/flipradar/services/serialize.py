@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from pydantic import ValidationError
+from sqlalchemy import ColumnElement, Text, cast, not_
 
 from ..collectors.base import CollectorInfo
 from ..models import FeeProfile, Listing, Opportunity, PriceObservation, Product, Source
@@ -29,6 +30,14 @@ from ..schemas import (
 from .timeutil import as_utc, as_utc_opt
 
 SEVERITY_RANK = {"none": 0, "info": 1, "warning": 2, "critical": 3}
+
+
+def no_critical_risk(column: Any) -> ColumnElement[bool]:
+    """SQL clause: a JSON risk-flag column contains no ``"critical"`` severity.
+
+    Works on the serialised JSON text (a JSON-escaped ``\\"critical\\"`` inside a message never matches).
+    """
+    return not_(cast(column, Text).like('%"critical"%'))
 
 
 def risk_level(flags: list[dict[str, Any]] | None) -> str:

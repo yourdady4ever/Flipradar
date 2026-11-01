@@ -18,16 +18,27 @@ from sqlalchemy.orm import Session
 from ..collectors import registry
 from ..collectors.base import Collector, CollectorError, CollectorNotConfigured
 from ..config import Settings, get_settings
+from ..engine.types import RawListing
 from ..models import CollectionRun, Source, TrackedSearch
 from ..schemas import CollectionRunOut, CollectResult
 from . import analysis
 from .errors import NotFound
-from .ingestion import ingest_raw_listings
+from .ingestion import IngestStats, ingest_raw_listings
 from .timeutil import as_utc, utcnow
 
 log = logging.getLogger(__name__)
 
 MAX_ERROR_LENGTH = 1000
+NO_SOURCE_MESSAGE = (
+    "no enabled source with search support is configured; add credentials for a collector (see "
+    "docs/DATA_SOURCES.md) or import data with CSV"
+)
+
+
+def _ingest_atomic(session: Session, key: str, raws: list[RawListing], settings: Settings) -> IngestStats:
+    """Ingest one source's batch inside a SAVEPOINT so a failure leaves no partial rows behind."""
+    with session.begin_nested():
+        return ingest_raw_listings(session, key, raws, settings=settings)
 
 
 def run_out(run: CollectionRun, source_key: str | None) -> CollectionRunOut:
@@ -89,6 +100,14 @@ async def run_collection(
     keys = list(dict.fromkeys(source_keys or [])) or searchable_source_keys(session, settings)
     runs: list[tuple[CollectionRun, str | None]] = []
     touched: set[int] = set()
+    if not keys:
+        # Make "nothing happened" visible in the run history instead of silently doing nothing.
+        run = CollectionRun(tracked_search_id=tracked_search_id, query=query[:200], started_at=utcnow(), status="running")
+        session.add(run)
+        session.flush()
+        _finish(run, None, "skipped", NO_SOURCE_MESSAGE, utcnow())
+        session.commit()
+        return CollectResult(runs=[run_out(run, None)])
 
     for key in keys:
         source = session.scalars(select(Source).where(Source.key == key)).first()
@@ -116,7 +135,7 @@ async def run_collection(
                 continue
             raws = await collector.search(query, limit=limit)
             raws = list(raws)[: max(1, limit)]
-            stats = await asyncio.to_thread(ingest_raw_listings, session, key, raws, settings=settings)
+            stats = await asyncio.to_thread(_ingest_atomic, session, key, raws, settings)
             run.items_fetched = len(raws)
             run.items_new = stats.new
             run.items_updated = stats.updated

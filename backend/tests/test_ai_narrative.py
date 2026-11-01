@@ -42,7 +42,7 @@ def test_validator_accepts_numbers_from_facts():
 def test_validator_rejects_invented_numbers():
     ok, unknown = narrative.validate_summary(INVENTED, FACTS)
     assert not ok and unknown == ["45"]
-    assert not narrative.validate_summary("ROI de 25%", FACTS)[0]  # 25 only appears in a key name ("p25"-like)
+    assert not narrative.validate_summary("ROI de 25%", FACTS)[0]
     assert not narrative.validate_summary("Ganancia de $2,351.00", FACTS)[0]
 
 

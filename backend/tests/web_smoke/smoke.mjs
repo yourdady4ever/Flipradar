@@ -99,7 +99,17 @@ export async function runSmoke({ url, token, mutate = false, log = console.log }
 
     await step('opportunity detail', async () => {
       await gotoView('opportunities');
-      const link = page.locator('#main a.row-link').first();
+      let link = page.locator('#main a.row-link').first();
+      if ((await link.count()) === 0) {
+        // opportunities whose buy listing is flagged suspicious are hidden by default; the empty state offers them
+        const reveal = await page.waitForSelector('#main .hidden-suspicious button', { timeout: 4000 }).catch(() => null);
+        if (reveal) {
+          log('       (only suspicious-flagged opportunities exist: revealing them via the empty-state button)');
+          await reveal.click();
+          await page.waitForSelector('#main a.row-link');
+          link = page.locator('#main a.row-link').first();
+        }
+      }
       if ((await link.count()) === 0) {
         const empty = await page.locator('#main .empty').count();
         if (!empty) throw new Error('neither rows nor the empty state are shown');
@@ -185,6 +195,97 @@ export async function runSmoke({ url, token, mutate = false, log = console.log }
         await page.waitForSelector('#main p:has-text("No sales recorded yet.")');
         await page.click('#main button:has-text("Delete item")');
         await page.waitForSelector('#main[data-ready="inventory"]');
+      });
+    }
+
+    if (mutate) {
+      const successToast = (text) => page.waitForSelector(`.toast-success:has-text("${text}")`);
+
+      await step('opportunity watch + mark bought', async () => {
+        await gotoView('opportunities');
+        const reveal = await page.$('#main .hidden-suspicious button');
+        if (reveal) {
+          await reveal.click();
+          await page.waitForSelector('#main a.row-link');
+        }
+        const link = page.locator('#main a.row-link').first();
+        if ((await link.count()) === 0) {
+          log('       (no opportunities: skipped)');
+          return;
+        }
+        await link.click();
+        await page.waitForSelector('.drawer[data-ready]');
+        await page.click('.drawer .actions button:has-text("Watch")');
+        await successToast('Watching');
+        await page.waitForSelector('.drawer[data-ready] .badges:has-text("watching")');
+        await page.click('.drawer button:has-text("Mark bought")');
+        await page.fill('.drawer input[name="quantity"]', '2');
+        await page.click('.drawer button:has-text("Confirm purchase")');
+        await successToast('Added to inventory');
+        await page.keyboard.press('Escape');
+        await page.waitForSelector('.drawer', { state: 'hidden' });
+      });
+
+      await step('tracked search create/edit/delete', async () => {
+        await gotoView('sources');
+        await page.fill('#main form[aria-label="Add tracked search"] input[name="query"]', 'smoke test query');
+        await page.fill('#main form[aria-label="Add tracked search"] input[name="interval_minutes"]', '60');
+        await page.click('#main button:has-text("Add search")');
+        const row = page.locator('#main tr', { hasText: 'smoke test query' });
+        await row.waitFor();
+        await row.locator('button:has-text("Edit")').click();
+        await page.fill('#main form[aria-label="Edit tracked search"] input[name="max_results"]', '25');
+        await page.click('#main button:has-text("Save search")');
+        await successToast('Search updated');
+        await page.locator('#main tr', { hasText: 'smoke test query' }).locator('button:has-text("Delete")').click();
+        await page.locator('#main tr', { hasText: 'smoke test query' }).waitFor({ state: 'detached' });
+      });
+
+      await step('CSV import + recompute', async () => {
+        await page.setInputFiles('#main input[type="file"][name="file"]', {
+          name: 'smoke.csv',
+          mimeType: 'text/csv',
+          buffer: Buffer.from('title,price,condition,url\nSMOKE TEST item alpha 64gb,1234.50,used,https://example.invalid/a\n'),
+        });
+        await page.click('#main button:has-text("Upload & import")');
+        await successToast('CSV imported');
+        await page.click('#main button:has-text("Recompute opportunities")');
+        await page.waitForSelector('#main .card:has-text("Recompute result")');
+      });
+
+      await step('fee profile create/edit/delete', async () => {
+        await gotoView('settings');
+        const f = '#main form[aria-label="New fee profile"]';
+        await page.fill(`${f} input[name="key"]`, 'smoke_profile');
+        await page.fill(`${f} input[name="name"]`, 'Smoke profile');
+        await page.fill(`${f} input[name="commission"]`, '12.5');
+        await page.click(`${f} button:has-text("Add tier")`);
+        await page.click(`${f} button:has-text("Add tier")`);
+        const maxes = page.locator(`${f} input[name="tier_max"]`);
+        const fees = page.locator(`${f} input[name="tier_fee"]`);
+        await maxes.nth(0).fill('299');
+        await fees.nth(0).fill('25');
+        await fees.nth(1).fill('0');
+        await page.click(`${f} button:has-text("Create profile")`);
+        const row = page.locator('#main tr', { hasText: 'smoke_profile' });
+        await row.waitFor();
+        const text = await row.textContent();
+        if (!text.includes('12.50%') || !text.includes('$299.00') || !text.includes('$25.00')) throw new Error(`profile not round-tripped: ${text}`);
+        await row.locator('button:has-text("Edit")').click();
+        await page.fill('#main form[aria-label="Edit fee profile"] input[name="name"]', 'Smoke profile edited');
+        await page.click('#main button:has-text("Save profile")');
+        await page.locator('#main tr', { hasText: 'Smoke profile edited' }).waitFor();
+        await page.locator('#main tr', { hasText: 'smoke_profile' }).locator('button:has-text("Delete")').click();
+        await page.locator('#main tr', { hasText: 'smoke_profile' }).waitFor({ state: 'detached' });
+        await page.click('#main button:has-text("Save settings")');
+        await successToast('Settings saved');
+      });
+
+      await step('notifications mark all read', async () => {
+        await gotoView('notifications');
+        await page.click('#main button:has-text("Mark all read")');
+        await successToast('marked as read');
+        if (await page.locator('#main .notif.unread').count()) throw new Error('unread notifications remain');
       });
     }
 

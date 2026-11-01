@@ -156,7 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for router in API_ROUTERS:
         app.include_router(router, prefix=API_PREFIX, dependencies=[Depends(require_token)])
 
-    @app.get("/", include_in_schema=False, response_model=None)
+    @app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False, response_model=None)
     def index() -> FileResponse | HTMLResponse:
         if INDEX_HTML.is_file():
             return FileResponse(INDEX_HTML, media_type="text/html")

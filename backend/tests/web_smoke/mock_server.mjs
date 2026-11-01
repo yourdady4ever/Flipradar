@@ -144,10 +144,6 @@ async function handleApi(st, req, res, url) {
       return send(res, 422, { detail: 'invalid JSON' });
     }
   }
-  const id = (re) => {
-    const mm = re.exec(p);
-    return mm ? Number(mm[1]) : null;
-  };
   let mm;
 
   if (p === '/auth/check' && m === 'GET') return send(res, 200, { ok: true, token_name: 'smoke', auth_required: true });

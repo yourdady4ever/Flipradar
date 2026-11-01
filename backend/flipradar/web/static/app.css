@@ -242,9 +242,6 @@ main { grid-area: main; padding: 20px 24px 56px; min-width: 0; max-width: 1440px
 @media (max-width: 520px) {
   .server-info .token-name { display: none; }
   .brand span { font-size: 0.95rem; }
-  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .tile { padding: 10px; }
-  .tile-value { font-size: 1.08rem; }
 }
 @media (max-width: 400px) {
   .server-info { display: none; }
@@ -460,3 +457,16 @@ details[open] > summary { margin-bottom: 8px; }
   .drawer { position: static; width: auto; box-shadow: none; border: 0; }
 }
 .card > .field-check { padding-top: 0; }
+
+/* phone overrides that must come after the base component rules */
+@media (max-width: 520px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .tile { padding: 10px; }
+  .tile-value { font-size: 1.08rem; }
+  .view-head h1 { font-size: 1.3rem; }
+}
+@media (max-width: 520px) {
+  .filters.form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }
+  .filters .field > label { font-size: 0.78rem; }
+  .filters .field-check { padding-top: 4px; grid-column: 1 / -1; }
+}

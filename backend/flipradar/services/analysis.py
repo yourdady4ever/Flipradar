@@ -312,13 +312,24 @@ def recompute(
 
     touched: list[Opportunity] = []
     created = updated = expired = 0
+    failed = 0
     for product in products:
-        opps, c, u, e = analyze_one_product(session, product, fee_model, base, now)
+        try:
+            with session.begin_nested():  # one broken product must not abort the whole recompute
+                opps, c, u, e = analyze_one_product(session, product, fee_model, base, now)
+        except NotImplementedError:
+            raise
+        except Exception:
+            failed += 1
+            log.exception("analysis failed for product %s (%s)", product.id, product.canonical_key)
+            continue
         touched.extend(opps)
         created += c
         updated += u
         expired += e
     session.commit()
+    if failed:
+        log.warning("recompute: %d of %d product(s) failed; see the log", failed, len(products))
 
     notifications = alerts_service.evaluate(session, touched, settings, dispatch=False)
     session.commit()

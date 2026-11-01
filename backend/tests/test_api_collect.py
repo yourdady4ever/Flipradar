@@ -205,3 +205,27 @@ def test_check_url_saves_listing(api, monkeypatch, db):
     assert body["listing"]["price_cents"] == 1_499_900
     assert db.scalars(select(Listing).where(Listing.external_id == "https://tienda.example.com/p/1")).one()
     assert api.post("/api/v1/check-url", json={"url": "not a url"}).status_code == 422
+
+
+def test_collect_without_configured_sources_records_skipped_run(api, db):
+    api.patch("/api/v1/sources/fakesource", json={"enabled": False})
+    api.patch("/api/v1/sources/brokensource", json={"enabled": False})
+    result = collect(api, source_keys=[])
+    assert len(result["runs"]) == 1
+    run = result["runs"][0]
+    assert run["status"] == "skipped" and run["source_key"] is None and "no enabled source" in run["error"]
+
+
+def test_failed_ingestion_leaves_no_partial_rows(api, db, monkeypatch):
+    from flipradar.services import ingestion
+
+    real = ingestion.ingest_raw_listings
+
+    def explode_after_flush(session, key, raws, **kwargs):
+        real(session, key, raws[:2], **kwargs)
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("flipradar.services.collection.ingest_raw_listings", explode_after_flush)
+    result = collect(api)
+    assert result["runs"][0]["status"] == "error" and "RuntimeError" in result["runs"][0]["error"]
+    assert db.query(Listing).count() == 0

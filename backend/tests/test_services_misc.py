@@ -14,7 +14,6 @@ from flipradar.models import FxRate, Notification, TrackedSearch
 from flipradar.services import fx, notify, scheduler
 from tests.conftest import make_settings
 
-
 # ------------------------------------------------------------------------------------------------ FX
 
 

@@ -10,6 +10,7 @@ def test_health_is_public(client):
     assert body["status"] == "ok" and body["api_version"] == "1"
     assert body["database"].startswith("sqlite")
     assert body["time"].endswith("Z") or "+00:00" in body["time"]
+    assert client.head("/health").status_code == 200  # uptime monitors often use HEAD
 
 
 def test_dashboard_root_served(client):
@@ -17,6 +18,7 @@ def test_dashboard_root_served(client):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "<html" in r.text.lower()
+    assert client.head("/").status_code == 200
 
 
 def test_dashboard_placeholder_when_template_missing(tmp_path, monkeypatch):
