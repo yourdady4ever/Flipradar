@@ -161,18 +161,19 @@ def test_no_results_returns_empty_list():
         assert run(ebay.EbayCollector(make_settings()).search("zzzz")) == []
 
 
-def test_daily_quota_guard(monkeypatch):
-    monkeypatch.setattr(ebay, "DEFAULT_DAILY_CALL_LIMIT", 2)
+def test_daily_quota_guard():
+    settings = make_settings()
+    settings.ebay_daily_call_limit = 2
     with respx.mock(assert_all_called=False) as router:
         router.post(TOKEN_URL).mock(return_value=token_response())
         search = router.get(SEARCH_URL).mock(return_value=httpx.Response(200, json={"total": 0}))
-        collector = ebay.EbayCollector(make_settings())
+        collector = ebay.EbayCollector(settings)
         run(collector.search("a"))
         run(collector.search("b"))
         with pytest.raises(ebay.EbayQuotaExceeded, match="daily safety limit"):
             run(collector.search("c"))
         assert search.call_count == 2
-    status = ebay.quota_status(make_settings())
+    status = ebay.quota_status(settings)
     assert status["calls"] == 2 and status["limit"] == 2
 
 

@@ -20,7 +20,7 @@ Legend: **Status** = `implemented` (code exists and is tested with mocked respon
 | **Mercado Libre México: catalog API** (`/products/search`, `/products/{id}/items`, `/users/{id}`, `/sites/MLM/domain_discovery/search`, `/sites/MLM/listing_prices`) | implemented (`collectors/mercadolibre.py`) | Your own free ML DevCenter app: `client_id` + `client_secret`, using an `authorization_code`/`refresh_token` grant or the undocumented but community-verified `client_credentials` grant. Requires a ML account with validated holder data. | Free | No public number; quotas are per Client ID and per endpoint. Handle 429. | Per-seller prices for **catalog** products (new items with GTIN or brand+model), seller reputation, category prediction, and exact commission per category and listing type | medium |
 | **eBay Browse API** (`item_summary/search`) | implemented (`collectors/ebay.py`) | Your own free eBay Developers Program production keyset, using an OAuth `client_credentials` application token | Free | 5,000 Browse calls/day by default; 1,000 token requests/day; token lives 7,200 s | **Active** US listings that ship to Mexico (`deliveryCountry:MX`), in USD, with shipping to MX. Used for cross-border arbitrage. | high |
 | **Banco de México SIE API**, series `SF43718` (FIX USD/MXN) | implemented (`collectors/banxico.py`) | Free 64-character token (header `Bmx-Token`) | Free | 80 queries/min and 40,000/day for "oportuno"; FLIP RADAR calls it at most twice a day | Official FIX rate, which is the basis for customs value conversion | high |
-| **Frankfurter** (ECB reference rates) | implemented (FX fallback) | none | Free | none documented | USD/MXN cross rate, labeled *estimate* | medium |
+| **Frankfurter** (blended reference rates) | implemented (FX fallback, v1 endpoint) | none | Free | No published number; heavy requests get 503 with `Retry-After` | USD/MXN, labeled *estimate*. **v1 is frozen and deprecated** (it sends a `Deprecation` header dated 2026-05-18); v2 is `GET /v2/rates?base=USD&quotes=MXN`. FLIP RADAR rejects FX quotes older than 7 days. | medium |
 | **ExchangeRate-API open access** (`open.er-api.com/v6/latest/USD`) | implemented (second FX fallback) | none | Free; attribution "Rates By Exchange Rate API" required | Recommended at most one call per 24 h | USD/MXN, labeled *estimate* | high |
 | **RSS/Atom deal feeds** chosen by the operator (`FLIPRADAR_RSS_FEEDS`) | implemented (`collectors/rss.py`) | none | Free | Poll every 15–30 min or slower | Deal titles and links, plus the price when it is stated unambiguously | n/a (no feed is enabled by default) |
 | **schema.org JSON-LD on a single product page the user pastes** | implemented (`collectors/jsonld.py`) | none | Free | One page per user action | Product name, price, currency, condition and GTIN from structured data. Respects `robots.txt`, has an SSRF guard, and refuses sites whose terms forbid automation (Facebook, Amazon, Mercado Libre). | n/a |
@@ -69,7 +69,7 @@ Legend: **Status** = `implemented` (code exists and is tested with mocked respon
 | Google Custom Search JSON API | Reportedly closed to new customers in 2025, with existing keys ending 2027-01-01 (UNVERIFIED) | low |
 | Google Shopping | No buyer-side API. The Content/Merchant API is seller-side only. | medium |
 | SerpApi and similar SERP APIs | Tiny free quota and Google ToS/legal risk (UNVERIFIED details). Not implemented. | low |
-| PROFECO "Quién es Quién en los Precios" | Official free open data, but published about 2 months late, as bulk archives (about 7 GB CSV per year), mostly groceries and household goods. Useful only as a manual reference. The Buen Fin 2026 electronics tracker has no API. | medium |
+| PROFECO "Quién es Quién en los Precios" | Official free open data, licensed CC-BY-4.0 (datos.gob.mx record). It lags 5–9 weeks and ships as one RAR5 archive per year: 2025 is 85 MB compressed and 4.2 GB of CSV, with a 15-column lowercase header. It covers 30 states and 242 chains, including the "Electrodomésticos" catalogue (TVs, appliances); phones and consoles are unverified. These are shelf prices of new goods, so they are useful only as a reference for retail prices. Importing it is in the TODO list. The Buen Fin 2026 electronics tracker has no API. | medium |
 | INEGI indicators API | Free token, but it provides macro indices (INPC), not product prices | medium |
 | UPCitemdb / Open Products Facts / Icecat / Wikidata | Possible future normalization helpers (GTIN to brand/model). None provides prices. Not needed for v1. | low–medium |
 
@@ -95,10 +95,17 @@ Several are marked low confidence because the official pages could not be fetche
   *Medium confidence.*
 
 ### Platform tax withholdings (persona física selling through platforms)
-* ISR withholding: **2.5 %** of the price excluding IVA from 2026-01-01 (it was 1 % in 2025).
-  Without an RFC the rate is **20 %**. *Medium confidence.*
-* IVA withholding: **8 %** of the price excluding IVA (50 % of the 16 % IVA). Without an RFC the rate
-  is **16 %**. *Low–medium confidence.*
+* ISR withholding: **2.5 %** of the price excluding IVA, **for fiscal year 2026 only**. This is set by
+  the Ley de Ingresos de la Federación 2026, Art. 25 fr. VI (DOF 07-11-2025), which replaces the 1 %
+  of LISR Art. 113-A fr. III. Re-check when the LIF 2027 is published; the statutory fallback is 1 %.
+  Without an RFC the rate is **20 %** (LISR 113-C). *High confidence.* In 2026, personas morales are
+  also withheld 2.5 %.
+* IVA withholding: **8 %** of the price excluding IVA (50 % of the 16 % IVA, LIVA Art. 18-J fr. II a).
+  Without an RFC the rate is **16 %**. *Medium confidence.*
+* Mercado Libre's seller-center page "¿Qué son y cómo se aplican las retenciones?" (quoted in a
+  secondary source, read 2026-10-28) says withholdings apply to **new** items. **Used items sold by
+  sellers with an RFC have 0 % withholding.** FLIP RADAR therefore ships separate fee profiles for
+  used items. *Medium confidence.*
 * Whether withholdings are a final cost depends on your tax regime. The calculator lets you toggle
   this. **This is not tax advice.**
 
