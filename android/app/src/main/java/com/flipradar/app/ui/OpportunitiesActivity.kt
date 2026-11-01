@@ -69,11 +69,18 @@ class OpportunitiesActivity : BaseActivity() {
         filters.addView(row2, lp())
         suspicious = checkbox(getString(R.string.opp_include_suspicious))
         filters.addView(suspicious, lp())
-        filters.addView(button(getString(R.string.action_apply)) { reload() }, lp())
-        root.addView(filters, lp())
+        filters.addView(button(getString(R.string.action_apply)) {
+            filters.visibility = View.GONE
+            reload()
+        }, lp())
+        filters.visibility = View.GONE // collapsed by default so the list gets the screen
 
-        summary = muted("").apply { setPadding(dp(12), dp(4), dp(12), dp(4)) }
-        root.addView(summary, lp())
+        val header = hbox().apply { setPadding(dp(12), 0, dp(4), 0) }
+        summary = muted("")
+        header.addView(summary, lp(0, WRAP, 1f))
+        header.addView(flatButton(getString(R.string.action_toggle_filters)) { toggleFilters() }, lp(WRAP, WRAP))
+        root.addView(header, lp())
+        root.addView(filters, lp())
 
         list = ListView(this).apply {
             divider = null
@@ -100,6 +107,10 @@ class OpportunitiesActivity : BaseActivity() {
         root.addView(list, lp(MATCH, 0, 1f))
         setScreen(root)
         reload()
+    }
+
+    private fun toggleFilters() {
+        filters.visibility = if (filters.visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
     private fun currentQuery(): OpportunityQuery = OpportunityQuery(
@@ -169,7 +180,7 @@ class OpportunitiesActivity : BaseActivity() {
             reload(); true
         }
         MENU_FILTERS -> {
-            filters.visibility = if (filters.visibility == View.VISIBLE) View.GONE else View.VISIBLE; true
+            toggleFilters(); true
         }
         MENU_RECOMPUTE -> {
             call({ api -> api.recompute() }, toastErrors = true) { r ->
@@ -224,12 +235,11 @@ class OpportunitiesActivity : BaseActivity() {
             val badgeList = listOfNotNull(
                 ctx.badge(getString(R.string.badge_confidence, Labels.level(ctx, item.confidence)), ctx.confidenceColor(item.confidence)),
                 ctx.badge(getString(R.string.badge_risk, Labels.risk(ctx, item.riskLevel)), ctx.severityColor(item.riskLevel)),
-                ctx.badge(item.buySourceKey, getColor(R.color.severity_none)),
                 if (item.status != "new") ctx.badge(Labels.opportunityStatus(ctx, item.status), getColor(R.color.brand_primary)) else null,
                 if (item.isDemo) ctx.badge(getString(R.string.badge_demo), getColor(R.color.severity_warning)) else null,
             )
             for (b in badgeList) h.badges.addView(b, lp(WRAP, WRAP).apply { marginEnd = dp(6) })
-            h.meta.text = getString(
+            h.meta.text = item.buySourceKey + " \u00b7 " + getString(
                 R.string.opp_row_meta, Labels.condition(ctx, item.buyCondition), item.comparableCount,
                 Labels.level(ctx, item.demandLevel), Formats.dateTime(item.updatedAt),
             )

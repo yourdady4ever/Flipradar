@@ -32,8 +32,11 @@ android {
     }
 
     testOptions {
-        // Pure-JVM unit tests (Money, ApiModels, ServerUrl) never touch android.* APIs.
+        // Pure-JVM unit tests (Money, ApiModels, ServerUrl, ApiClient over a local HTTP server) never
+        // touch android.* APIs.
         unitTests.isReturnDefaultValues = true
+        // The desktop JDK's HttpURLConnection rejects PATCH; ApiClient's fallback needs java.net opened.
+        unitTests.all { it.jvmArgs("--add-opens", "java.base/java.net=ALL-UNNAMED") }
     }
 
     lint {

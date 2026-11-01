@@ -13,7 +13,7 @@
     <string name="action_refresh">Actualizar</string>
     <string name="action_apply">Aplicar filtros</string>
     <string name="action_load_more">Cargar más</string>
-    <string name="action_toggle_filters">Mostrar/ocultar filtros</string>
+    <string name="action_toggle_filters">Filtros</string>
     <string name="action_recompute">Recalcular oportunidades</string>
     <string name="action_save">Guardar</string>
     <string name="action_delete">Eliminar</string>
@@ -35,7 +35,7 @@
     <string name="no_url">Este elemento no tiene enlace web</string>
     <string name="no_app_for_url">Ninguna app puede abrir este enlace</string>
     <string name="setup_title">Configuración del servidor</string>
-    <string name="setup_intro">Conéctate a tu propio servidor FLIP RADAR. El token de la API está en el archivo .env del servidor (FLIPRADAR_API_TOKENS) o en su consola.</string>
+    <string name="setup_intro">Conéctate a tu propio servidor FLIP RADAR. Crea un token de la API en el servidor con: flipradar create-token. Para acceso por red local inicia el servidor con FLIPRADAR_HOST=0.0.0.0.</string>
     <string name="setup_url_label">URL del servidor</string>
     <string name="setup_url_hint">http://192.168.1.20:8000</string>
     <string name="setup_token_label">Token de la API</string>

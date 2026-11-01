@@ -15,7 +15,7 @@
     <string name="action_refresh">Refresh</string>
     <string name="action_apply">Apply filters</string>
     <string name="action_load_more">Load more</string>
-    <string name="action_toggle_filters">Show/hide filters</string>
+    <string name="action_toggle_filters">Filters</string>
     <string name="action_recompute">Recompute opportunities</string>
     <string name="action_save">Save</string>
     <string name="action_delete">Delete</string>
@@ -37,7 +37,7 @@
     <string name="no_url">This item has no web link</string>
     <string name="no_app_for_url">No app can open this link</string>
     <string name="setup_title">Server settings</string>
-    <string name="setup_intro">Connect to your own FLIP RADAR backend. Find the API token in the server\'s .env file (FLIPRADAR_API_TOKENS) or the server console.</string>
+    <string name="setup_intro">Connect to your own FLIP RADAR backend. Create an API token on the server with: flipradar create-token. For LAN access start the server with FLIPRADAR_HOST=0.0.0.0.</string>
     <string name="setup_url_label">Server URL</string>
     <string name="setup_url_hint">http://192.168.1.20:8000</string>
     <string name="setup_token_label">API token</string>
