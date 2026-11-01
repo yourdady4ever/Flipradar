@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Local data / secrets
+backend/data/
+*.db
+*.db-wal
+*.db-shm
+.env
+*.env.local
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/out/
+*.keystore
+!android/app/debug-offline.keystore.README
+*.jks
+captures/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
