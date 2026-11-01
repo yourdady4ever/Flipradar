@@ -395,7 +395,6 @@ WEAK_ACCESSORY_WORDS: tuple[tuple[str, str], ...] = (
     (r"juegos?", "software"),
     (r"videojuegos?", "software"),
     (r"games?", "software"),
-    (r"audifonos", "audio"),
     (r"caja", "empty_box"),
 )
 
@@ -496,7 +495,12 @@ STANDARD_INCLUSIONS: frozenset[str] = frozenset(
 # ------------------------------------------------------------------------------------------------
 
 COLORS: tuple[tuple[str, str], ...] = (
-    (r"titanio\snatural|natural\stitanium", "natural titanium"),
+    (r"titanio\snatural|natural\stitanium|titanium\snatural", "natural titanium"),
+    (r"titanium\sgr[ae]y|titanio\sgris|gris\stitanio", "gray titanium"),
+    (r"titanium\sblack|negro\stitanio", "black titanium"),
+    (r"titanium\sviolet|titanio\svioleta", "violet titanium"),
+    (r"titanium\syellow|titanio\samarillo", "yellow titanium"),
+    (r"titanium\ssilver\sblue|titanium\sblue", "blue titanium"),
     (r"titanio\snegro|black\stitanium", "black titanium"),
     (r"titanio\sblanco|white\stitanium", "white titanium"),
     (r"titanio\sazul|blue\stitanium", "blue titanium"),
@@ -559,7 +563,7 @@ VARIANT_WORDS: frozenset[str] = frozenset(
     }
 )
 
-#: Prefix tokens that do not count as "unknown words before the model" (see extract._uncertain_prefix).
+#: Prefix tokens that do not count as "unknown words before the model" (see the ambiguity guard in extract._analyze_text).
 PREFIX_FILLERS: frozenset[str] = frozenset(
     set(DEVICE_NOUNS)
     | {
@@ -572,7 +576,7 @@ PREFIX_FILLERS: frozenset[str] = frozenset(
         "video", "grafica", "camara", "digital", "reloj", "videojuegos", "videoconsola", "smart", "watch",
         "tenis", "zapatillas", "kit", "1", "lector", "libros", "electronico", "e", "reader", "ereader",
         "modelo", "version", "edicion", "msi", "gigabyte", "zotac", "evga", "pny", "asus", "rog", "strix",
-        "tuf", "dual", "ventus", "gaming", "oc", "eagle", "windforce", "aorus", "xfx", "sapphire",
+        "tuf", "dual", "ventus", "oc", "eagle", "windforce", "aorus", "xfx", "sapphire",
         "powercolor", "rotomartillo", "taladro", "atornillador", "drone", "dron", "lego", "set", "dama",
         "hombre", "mujer", "caballero", "unisex", "nino", "nina",
     }
@@ -673,3 +677,1070 @@ class ModelHit:
     tokens: tuple[str, ...] = ()
     accessory_type: str | None = None
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+
+def _amb(note: str) -> Built:
+    """Family recognised but the exact sellable product is ambiguous -> never clustered."""
+    return Built(None, (), note)
+
+
+def _suffix(text: str, pos: int, options: tuple[str, ...], n: int = 3) -> str:
+    """Return ' <option>' when the tokens right after ``pos`` start with one of ``options``."""
+    nxt = next_tokens(text, pos, n)
+    for opt in sorted(options, key=lambda o: (-len(o.split()), o)):
+        parts = opt.split()
+        if nxt[: len(parts)] == parts:
+            return " " + opt
+    return ""
+
+
+def _net(text: str, pos: int, n: int = 4) -> str:
+    """' 5g' / ' 4g' when the network generation is stated right after the model name."""
+    nxt = next_tokens(text, pos, n)
+    if "5g" in nxt:
+        return " 5g"
+    if "4g" in nxt:
+        return " 4g"
+    return ""
+
+
+def _attached_plus(text: str, pos: int) -> bool:
+    return text[pos : pos + 1] == "+"
+
+
+# --- Apple ---------------------------------------------------------------------------------------
+
+_IPHONE_VALID: dict[str, frozenset[str]] = {
+    "11": frozenset({"", "pro", "pro max"}),
+    "12": frozenset({"", "mini", "pro", "pro max"}),
+    "13": frozenset({"", "mini", "pro", "pro max"}),
+    "14": frozenset({"", "plus", "pro", "pro max"}),
+    "15": frozenset({"", "plus", "pro", "pro max"}),
+    "16": frozenset({"", "plus", "pro", "pro max", "e"}),
+    "17": frozenset({"", "pro", "pro max", "e"}),
+}
+
+
+def _iphone(m: re.Match[str], text: str) -> Built:
+    num = m["num"]
+    pos = m.end()
+    plus = _attached_plus(text, pos)
+    if plus:
+        pos += 1
+    nxt = next_tokens(text, pos, 3)
+    if num == "air":
+        return Built("iphone air")
+    if num in ("x", "xr", "xs"):
+        if num == "xs" and nxt[:1] == ["max"]:
+            return Built("iphone xs max")
+        return Built(f"iphone {num}")
+    if num == "se":
+        years = {"2016": 1, "2020": 2, "2022": 3}
+        gen = years.get(nxt[0]) if nxt else None
+        gen = gen or find_generation(nxt) or (ordinal_value(nxt[0]) if nxt else None)
+        if gen in (1, 2, 3):
+            return Built(f"iphone se {gen}")
+        return _amb("iPhone SE generation not stated")
+    if m["e"] or nxt[:1] == ["e"]:
+        suffix = "e"
+    elif plus:  # "iphone 15+" (attached); a spaced " + " is a bundle separator, not the Plus model
+        suffix = "plus"
+    elif nxt[:2] == ["pro", "max"]:
+        suffix = "pro max"
+    elif nxt[:1] == ["pro"]:
+        suffix = "pro"
+    elif nxt[:1] == ["plus"]:
+        suffix = "plus"
+    elif nxt[:1] == ["mini"]:
+        suffix = "mini"
+    elif nxt[:1] == ["max"]:
+        return _amb(f"'iPhone {num} max' is ambiguous (Pro Max or Plus?)")
+    else:
+        suffix = ""
+    if suffix not in _IPHONE_VALID[num]:
+        return _amb(f"'iPhone {num} {suffix}' is not a model Apple sells")
+    if suffix == "e":
+        return Built(f"iphone {num}e")
+    return Built(f"iphone {num}" + (f" {suffix}" if suffix else ""))
+
+
+def _airpods(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    nxt = next_tokens(text, m.end(), 4)
+    gen = find_generation(nxt) or (ordinal_value(nxt[0]) if nxt else None)
+    if line == "max":
+        return Built("airpods max")
+    if line == "pro":
+        if gen in (1, 2, 3):
+            return Built(f"airpods pro {gen}")
+        return _amb("AirPods Pro generation not stated (Pro 1/2/3 differ a lot in price)")
+    if gen in (1, 2, 3, 4):
+        if gen == 4 and has(text, r"anc|cancelacion(?:\sactiva)?(?:\sde\sruido)?|noise\scancell?ing"):
+            return Built("airpods 4 anc")
+        return Built(f"airpods {gen}")
+    return _amb("AirPods generation not stated")
+
+
+def _apple_watch(m: re.Match[str], text: str) -> Built:
+    rest = " ".join(next_tokens(text, m.end(), 5))
+    s = re.match(r"(?:series?\s?|s)(\d{1,2})(?![\w.])", rest) or re.match(r"(\d{1,2})(?![\w.])", rest)
+    if s and 1 <= int(s.group(1)) <= 11:
+        return Built(f"apple watch series {int(s.group(1))}")
+    se = re.match(r"se(?:\s(\S+))?(?:\s(\S+))?", rest)
+    if se:
+        toks = [t for t in (se.group(1), se.group(2)) if t]
+        years = {"2020": 1, "2022": 2, "2023": 2, "2025": 3}
+        gen = (years.get(toks[0]) if toks else None) or find_generation(toks) or (
+            ordinal_value(toks[0]) if toks else None
+        )
+        if gen in (1, 2, 3):
+            return Built("apple watch se" + (f" {gen}" if gen > 1 else ""))
+        return _amb("Apple Watch SE generation not stated")
+    ultra = re.match(r"ultra(?:\s(\d))?(?!\w)", rest)
+    if ultra:
+        if ultra.group(1) in ("1", "2", "3"):
+            return Built(f"apple watch ultra {ultra.group(1)}")
+        return _amb("Apple Watch Ultra generation not stated")
+    return _amb("Apple Watch series not stated")
+
+
+_IPAD_A_CHIPS = {"a16": "ipad 11", "a14": "ipad 10", "a13": "ipad 9", "a12": "ipad 8"}
+_IPAD_AIR_GEN_CHIP = {5: "m1", 6: "m2", 7: "m3"}
+
+
+def _ipad(m: re.Match[str], text: str) -> Built:
+    line = m["line"] or "base"
+    toks = next_tokens(text, m.end(), 8)
+    joined = " ".join(toks)
+    chip_m = re.search(r"(?<!\w)m([1-5])(?!\w)", joined)
+    chip_a = re.search(r"(?<!\w)a(1[2-9])(?:\s?(?:pro|bionic))?(?!\w)", joined)
+    gen = find_generation(toks)
+    direct = int(toks[0]) if toks and toks[0].isdigit() else None
+    tokens: tuple[str, ...] = ()
+    if line == "base":
+        gen = gen or (direct if direct and direct <= 11 else None)
+        if gen:
+            return Built(f"ipad {gen}")
+        if chip_a and f"a{chip_a.group(1)}" in _IPAD_A_CHIPS:
+            return Built(_IPAD_A_CHIPS[f"a{chip_a.group(1)}"])
+        return _amb("iPad generation not stated")
+    if direct in (11, 13):
+        tokens = (f"{direct}in",)
+        direct = None
+    if line == "air":
+        if chip_m:
+            return Built(f"ipad air m{chip_m.group(1)}", tokens)
+        gen = gen or (direct if direct and direct <= 7 else None)
+        if gen in _IPAD_AIR_GEN_CHIP:
+            return Built(f"ipad air {_IPAD_AIR_GEN_CHIP[gen]}", tokens)
+        if gen:
+            return Built(f"ipad air {gen}", tokens)
+        return _amb("iPad Air generation/chip not stated")
+    if line == "pro":
+        if chip_m:
+            return Built(f"ipad pro m{chip_m.group(1)}", tokens)
+        if gen:
+            return Built(f"ipad pro gen {gen}", tokens)
+        return _amb("iPad Pro chip/generation not stated")
+    # mini
+    if chip_a and chip_a.group(1) == "17":
+        return Built("ipad mini a17 pro")
+    gen = gen or (direct if direct and direct <= 7 else None)
+    if gen:
+        return Built(f"ipad mini {gen}")
+    return _amb("iPad mini generation not stated")
+
+
+def _macbook(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    if not line:
+        return _amb("MacBook line (Air/Pro) not stated")
+    toks = next_tokens(text, m.end(), 8)
+    chip = re.search(r"(?<!\w)m([1-5])(?:\s(pro|max|ultra))?(?!\w)", " ".join(toks)) or re.search(
+        r"(?<!\w)(?:chip\s)?m([1-5])(?:\s(pro|max|ultra))?(?!\w)", text
+    )
+    if not chip:
+        return _amb("MacBook chip not stated (Intel or unknown Apple silicon)")
+    tokens: tuple[str, ...] = ()
+    sizes = [t for t in toks[:3] if t in ("13", "14", "15", "16")]
+    if sizes:
+        tokens = (f"{sizes[0]}in",)
+    tier = f" {chip.group(2)}" if chip.group(2) else ""
+    return Built(f"macbook {line} m{chip.group(1)}{tier}", tokens)
+
+
+def _apple_pencil(m: re.Match[str], text: str) -> Built:
+    nxt = next_tokens(text, m.end(), 3)
+    if nxt[:1] == ["pro"]:
+        return Built("apple pencil pro")
+    if nxt[:2] == ["usb", "c"]:
+        return Built("apple pencil usb c")
+    gen = find_generation(nxt) or (ordinal_value(nxt[0]) if nxt else None)
+    if gen in (1, 2):
+        return Built(f"apple pencil {gen}")
+    return _amb("Apple Pencil generation not stated")
+
+
+# --- Samsung -------------------------------------------------------------------------------------
+
+
+def _galaxy_s(m: re.Match[str], text: str) -> Built:
+    num = m["num"]
+    nxt = next_tokens(text, m.end(), 2)
+    if m["plus"] or nxt[:1] == ["plus"]:
+        return Built(f"galaxy s{num}+")
+    for suffix in ("ultra", "fe", "edge"):
+        if nxt[:1] == [suffix]:
+            return Built(f"galaxy s{num} {suffix}")
+    return Built(f"galaxy s{num}")
+
+
+def _galaxy_am(m: re.Match[str], text: str) -> Built:
+    return Built(f"galaxy {m['line']}{m['num']}{m['s'] or ''}{_net(text, m.end(), 3)}")
+
+
+def _galaxy_z(m: re.Match[str], text: str) -> Built:
+    return Built(f"galaxy z {m['kind']}{m['num']}{_suffix(text, m.end(), ('fe',))}")
+
+
+def _galaxy_tab(m: re.Match[str], text: str) -> Built:
+    plus = "+" if m["plus"] else ""
+    suffix = "" if plus else _suffix(text, m.end(), ("ultra", "fe", "plus", "lite", "+"))
+    if suffix in (" plus", " +"):
+        suffix, plus = "", "+"
+    return Built(f"galaxy tab {m['line']}{m['num']}{plus}{suffix}")
+
+
+def _galaxy_watch(m: re.Match[str], text: str) -> Built:
+    num = m["num"]
+    suffix = _suffix(text, m.end(), ("classic", "pro", "fe", "ultra"))
+    if num:
+        return Built(f"galaxy watch {num}{suffix}")
+    if suffix in (" ultra", " fe"):
+        return Built(f"galaxy watch{suffix}")
+    return _amb("Galaxy Watch generation not stated")
+
+
+def _galaxy_buds(m: re.Match[str], text: str) -> Built:
+    num = m["num"]
+    if m["plus"] and not num:
+        return Built("galaxy buds+")
+    suffix = _suffix(text, m.end(), ("pro", "fe", "live", "core"))
+    if num:
+        return Built(f"galaxy buds {num}{suffix}")
+    if suffix:
+        return Built(f"galaxy buds{suffix}")
+    return _amb("Galaxy Buds generation not stated")
+
+
+# --- Xiaomi / Motorola / Google / other Android -------------------------------------------------
+
+
+def _redmi_note(m: re.Match[str], text: str) -> Built:
+    suffix = _suffix(text, m.end(), ("pro+", "pro plus", "pro", "plus"))
+    if suffix == " pro plus":
+        suffix = " pro+"
+    return Built(f"redmi note {m['num']}{m['s'] or ''}{suffix}{_net(text, m.end())}")
+
+
+def _redmi(m: re.Match[str], text: str) -> Built:
+    return Built(f"redmi {m['num']}{_net(text, m.end(), 3)}")
+
+
+def _poco(m: re.Match[str], text: str) -> Built:
+    suffix = _suffix(text, m.end(), ("pro", "gt", "ultra", "neo"))
+    return Built(f"poco {m['line']}{m['num']}{suffix}{_net(text, m.end())}")
+
+
+def _xiaomi_num(m: re.Match[str], text: str) -> Built:
+    suffix = _suffix(text, m.end(), ("pro", "ultra", "lite"))
+    return Built(f"xiaomi {m['num']}{m['t'] or ''}{suffix}")
+
+
+def _moto_g(m: re.Match[str], text: str) -> Built:
+    suffix = _suffix(text, m.end(), ("power", "play", "stylus", "plus", "fast", "pure", "neo"))
+    return Built(f"moto g{m['num']}{suffix}{_net(text, m.end())}")
+
+
+def _moto_edge(m: re.Match[str], text: str) -> Built:
+    if not m["num"]:
+        return _amb("Motorola Edge generation not stated")
+    suffix = _suffix(text, m.end(), ("pro", "ultra", "fusion", "neo", "plus"))
+    return Built(f"motorola edge {m['num']}{suffix}")
+
+
+def _razr(m: re.Match[str], text: str) -> Built:
+    if not m["num"]:
+        return _amb("Motorola razr generation not stated")
+    plus = "+" if m["plus"] else ""
+    suffix = "" if plus else _suffix(text, m.end(), ("ultra", "plus"))
+    return Built(f"motorola razr {m['num']}{plus}{suffix}")
+
+
+def _pixel(m: re.Match[str], text: str) -> Built:
+    a = "a" if m["a"] else ""
+    pos = m.end()
+    if not a and next_tokens(text, pos, 1) == ["a"]:
+        a = "a"
+        pos = text.index(" a", pos) + 2
+    suffix = "" if a else _suffix(text, pos, ("pro xl", "pro fold", "pro", "xl", "fold"))
+    return Built(f"pixel {m['num']}{a}{suffix}")
+
+
+def _huawei(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    base = f"p{m['num']}" if line == "p" else f"{line} {m['num']}"
+    suffix = _suffix(text, m.end(), ("pro+", "pro", "plus", "lite", "se", "ultra", "rs"))
+    return Built(f"huawei {base}{m['i'] or ''}{suffix}{_net(text, m.end())}")
+
+
+def _honor(m: re.Match[str], text: str) -> Built:
+    if m["mnum"]:
+        base = f"magic {m['mnum']}"
+    elif m["xnum"]:
+        base = f"x{m['xnum']}{m['xs'] or ''}"
+    else:
+        base = m["num"]
+    suffix = _suffix(text, m.end(), ("pro", "lite", "plus", "ultra"))
+    return Built(f"honor {base}{suffix}{_net(text, m.end())}")
+
+
+def _oppo(m: re.Match[str], text: str) -> Built:
+    if m["rnum"]:
+        base = f"reno {m['rnum']}{m['rf'] or ''}"
+    elif m["anum"]:
+        base = f"a{m['anum']}{m['as'] or ''}"
+    else:
+        base = f"find x{m['fnum']}"
+    suffix = _suffix(text, m.end(), ("pro+", "pro", "plus", "ultra"))
+    return Built(f"oppo {base}{suffix}{_net(text, m.end())}")
+
+
+def _realme(m: re.Match[str], text: str) -> Built:
+    if m["num"]:
+        base = f"{m['num']}{m['suf'] or ''}"
+    elif m["cnum"]:
+        base = f"c{m['cnum']}"
+    elif m["gnum"]:
+        base = f"gt {m['gnum']}"
+    else:
+        base = f"note {m['nnum']}"
+    suffix = _suffix(text, m.end(), ("pro+", "pro plus", "pro"))
+    if suffix == " pro plus":
+        suffix = " pro+"
+    return Built(f"realme {base}{suffix}{_net(text, m.end())}")
+
+
+def _oneplus(m: re.Match[str], text: str) -> Built:
+    if m["nnum"]:
+        ce = " ce" if " ce" in m.group(0) else ""
+        return Built(f"oneplus nord{ce} {m['nnum']}{_net(text, m.end())}")
+    suffix = _suffix(text, m.end(), ("pro",))
+    return Built(f"oneplus {m['num']}{m['t'] or ''}{suffix}")
+
+
+# --- Consoles & handheld PCs ---------------------------------------------------------------------
+
+
+def _ps5(m: re.Match[str], text: str) -> Built:
+    nxt = next_tokens(text, m.end(), 2)
+    if "pro" in nxt or has(text, r"cfi\s?7\d{0,3}\w?"):
+        return Built("ps5 pro")
+    if has(text, "slim") or has(text, r"cfi\s?2\d{0,3}\w?"):
+        return Built("ps5 slim")
+    return Built("ps5")
+
+
+def _ps4(m: re.Match[str], text: str) -> Built:
+    nxt = next_tokens(text, m.end(), 2)
+    if "pro" in nxt:
+        return Built("ps4 pro")
+    if has(text, "slim"):
+        return Built("ps4 slim")
+    return Built("ps4")
+
+
+def _const(model: str | None, note: str | None = None) -> Builder:
+    def build(_m: re.Match[str], _text: str) -> Built:
+        return Built(model, (), note)
+
+    return build
+
+
+def _dualsense(m: re.Match[str], _text: str) -> Built:
+    return Built("dualsense edge" if m["edge"] else "dualsense")
+
+
+def _xbox_series(m: re.Match[str], _text: str) -> Built:
+    return Built(f"xbox series {m['v']}")
+
+
+def _xbox_one(m: re.Match[str], _text: str) -> Built:
+    return Built(f"xbox one {m['v']}" if m["v"] else "xbox one")
+
+
+_SWITCH_QUANTITY_NOUNS = re.compile(r"juegos?|controles|controls|joycons?|mandos|piezas|unidades|accesorios")
+
+
+def _switch(m: re.Match[str], text: str) -> Built:
+    after = [t for t in next_tokens(text, m.end(), 4) if t not in ("modelo", "version", "edicion", "model")]
+    two = bool(after[:1] == ["2"] and not (len(after) > 1 and _SWITCH_QUANTITY_NOUNS.fullmatch(after[1])))
+    oled = has(text, "oled")
+    lite = has(text, "lite")
+    if sum((two, oled, lite)) > 1:
+        return _amb("conflicting Nintendo Switch models in title")
+    if two:
+        return Built("switch 2")
+    if oled:
+        return Built("switch oled")
+    if lite:
+        return Built("switch lite")
+    return Built("switch")
+
+
+def _steam_deck(_m: re.Match[str], text: str) -> Built:
+    oled = has(text, "oled")
+    lcd = has(text, "lcd")
+    if oled and lcd:
+        return _amb("Steam Deck: both LCD and OLED mentioned")
+    if oled:
+        return Built("steam deck oled")
+    if lcd:
+        return Built("steam deck lcd")
+    return Built("steam deck")  # refined by storage in refine_model()
+
+
+def _rog_ally(m: re.Match[str], text: str) -> Built:
+    if m["x"]:
+        return Built("rog ally x")
+    if has(text, r"z1\sextreme|z1e"):
+        return Built("rog ally z1 extreme")
+    if has(text, "z1"):
+        return Built("rog ally z1")
+    return _amb("ROG Ally chip (Z1 / Z1 Extreme) not stated")
+
+
+def _legion_go(m: re.Match[str], _text: str) -> Built:
+    return Built(f"legion go {m['v']}" if m["v"] else "legion go")
+
+
+# --- GPUs ----------------------------------------------------------------------------------------
+
+_PC_CONTEXT = (
+    r"laptop|notebook|portatil|computadora|pc\sgamer|cpu|gabinete|ryzen\s[3579]|core\si[3579]|"
+    r"i[3579]\s\d{4,5}\w*|desktop|torre|all\sin\sone|equipo\sgamer"
+)
+
+
+def _rtx(m: re.Match[str], text: str) -> Built:
+    if has(text, _PC_CONTEXT):
+        return _amb("GPU named inside a laptop/PC listing (the listing is not a graphics card)")
+    suffix = _suffix(text, m.end(), ("ti super", "ti", "super"))
+    return Built(f"rtx {m['num']}{suffix}")
+
+
+def _radeon(m: re.Match[str], text: str) -> Built:
+    if has(text, _PC_CONTEXT):
+        return _amb("GPU named inside a laptop/PC listing (the listing is not a graphics card)")
+    suffix = _suffix(text, m.end(), ("xtx", "xt", "gre"))
+    return Built(f"radeon rx {m['num']}{suffix}")
+
+
+# --- Cameras, drones, audio, wearables, e-readers -------------------------------------------------
+
+
+def _gopro(m: re.Match[str], text: str) -> Built:
+    suffix = _suffix(text, m.end(), ("mini", "creator"))
+    if suffix == " creator":
+        suffix = " creator edition"
+    return Built(f"gopro hero {int(m['num'])}{suffix}")
+
+
+def _gopro_max(m: re.Match[str], text: str) -> Built:
+    nxt = next_tokens(text, m.end(), 1)
+    return Built("gopro max 2" if nxt == ["2"] else "gopro max")
+
+
+def _dji(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    num = m["num"]
+    if line in ("neo", "flip"):
+        return Built(f"dji {line}")
+    if not num:
+        return _amb(f"DJI {line} generation not stated")
+    suffix = ""
+    if line == "mini":
+        suffix = _suffix(text, m.end(), ("pro", "se"))
+    elif line == "mavic":
+        suffix = _suffix(text, m.end(), ("pro", "classic", "cine"))
+    elif line == "osmo action":
+        suffix = _suffix(text, m.end(), ("pro",))
+    return Built(f"dji {line} {num}{suffix}")
+
+
+def _kindle(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    toks = next_tokens(text, m.end(), 6)
+    gen = find_generation(toks)
+    direct = int(toks[0]) if toks and toks[0].isdigit() and 1 <= int(toks[0]) <= 12 else None
+    years = [t for t in toks if re.fullmatch(r"20[12]\d", t)]
+    signature = " signature" if has(text, "signature") else ""
+    if line == "colorsoft":
+        return Built(f"kindle colorsoft{signature}")
+    if line == "paperwhite":
+        gen = gen or direct or {"2021": 11, "2024": 12}.get(years[0] if years else "")
+        if gen:
+            return Built(f"kindle paperwhite {gen}{signature}")
+        return _amb("Kindle Paperwhite generation not stated")
+    if line == "scribe":
+        gen = gen or {"2022": 1, "2024": 2}.get(years[0] if years else "")
+        if gen:
+            return Built(f"kindle scribe {gen}")
+        return _amb("Kindle Scribe generation not stated")
+    if line == "oasis":
+        if gen:
+            return Built(f"kindle oasis {gen}")
+        return _amb("Kindle Oasis generation not stated")
+    if gen:
+        return Built(f"kindle {gen}")
+    return _amb("Kindle model/generation not stated")
+
+
+def _echo(m: re.Match[str], text: str) -> Built:
+    line = m["line"]
+    gen = find_generation(next_tokens(text, m.end(), 5))
+    num = m["num"]
+    if line == "show" and num:
+        return Built(f"echo show {num}")
+    if gen or (num and line == "dot"):
+        return Built(f"echo {line} {gen or int(num)}")
+    if line in ("pop", "studio", "spot"):
+        return Built(f"echo {line}")
+    return _amb(f"Echo {line} generation not stated")
+
+
+def _sony_wh(m: re.Match[str], _text: str) -> Built:
+    return Built(f"{m['t']}-1000xm{m['n']}")
+
+
+def _bose(m: re.Match[str], text: str) -> Built:
+    rest = m["rest"]
+    if not rest:
+        return _amb("Bose QuietComfort model not stated")
+    nxt = next_tokens(text, m.end(), 2)
+    if rest == "ultra":
+        return Built("bose quietcomfort ultra" + (" earbuds" if nxt[:1] == ["earbuds"] else ""))
+    if rest == "earbuds":
+        return Built("bose quietcomfort earbuds" + (" ii" if nxt[:1] in (["ii"], ["2"]) else ""))
+    if rest == "35" and nxt[:1] in (["ii"], ["2"]):
+        return Built("bose quietcomfort 35 ii")
+    return Built(f"bose quietcomfort {rest}")
+
+
+def _jbl(m: re.Match[str], text: str) -> Built:
+    if not m["num"]:
+        return _amb(f"JBL {m['line']} generation not stated")
+    suffix = _suffix(text, m.end(), ("essential", "pro", "plus"))
+    return Built(f"jbl {m['line']} {m['num']}{suffix}")
+
+
+def _beats(m: re.Match[str], _text: str) -> Built:
+    rest = re.sub(r"(solo|studio)\s?(\d)", r"\1 \2", m["rest"])
+    return Built(f"beats {rest}" if not rest.startswith("powerbeats") else rest)
+
+
+def _garmin(m: re.Match[str], text: str) -> Built:
+    if m["line"] in ("instinct", "venu") and not has(text, "garmin"):
+        return _amb("generic word without Garmin brand")
+    if not m["num"]:
+        return _amb(f"Garmin {m['line']} model number not stated")
+    suffix = _suffix(text, m.end(), ("pro", "plus", "solar", "sq", "crossover", "amoled"))
+    return Built(f"garmin {m['line']} {m['num']}{suffix}")
+
+
+def _canon(m: re.Match[str], _text: str) -> Built:
+    ii = " ii" if m["ii"] else ""
+    if m["rnum"]:
+        return Built(f"canon eos r{m['rnum']}{ii}")
+    if m["reb"]:
+        return Built(f"canon eos rebel {m['reb']}")
+    return Built(f"canon eos {m['dnum']}{ii}")
+
+
+def _nikon(m: re.Match[str], _text: str) -> Built:
+    gen = f" {m['ii']}" if m["ii"] else ""
+    if m["z"]:
+        return Built(f"nikon z{m['z']}{gen}")
+    return Built(f"nikon d{m['d']}")
+
+
+def _fuji(m: re.Match[str], _text: str) -> Built:
+    return Built(f"fujifilm x{m['m']}")
+
+
+def _instax(m: re.Match[str], _text: str) -> Built:
+    if m["mini"]:
+        return Built(f"instax mini {m['mini']}")
+    if m["wide"]:
+        return Built(f"instax wide {m['wide']}")
+    return Built(f"instax square {m['sq']}")
+
+
+def _sony_alpha(m: re.Match[str], _text: str) -> Built:
+    gen = f" {m['gen']}" if m["gen"] else ""
+    return Built(f"sony a{m['num']}{gen}")
+
+
+def _sony_zv(m: re.Match[str], _text: str) -> Built:
+    return Built(f"sony zv-{m['m']}" + (" ii" if m["ii"] else ""))
+
+
+# --- Tools, toys, sneakers (exact SKU / set / style codes) ---------------------------------------
+
+
+def _code_if_brand(brand_word: str, fmt: Callable[[re.Match[str]], str]) -> Builder:
+    def build(m: re.Match[str], text: str) -> Built | None:
+        if not has(text, brand_word):
+            return None  # code-like token without the brand: not this family
+        return Built(fmt(m))
+
+    return build
+
+
+def _lego(m: re.Match[str], text: str) -> Built:
+    for num in re.finditer(r"(?<![\w.])(\d{4,6})(?![\w.])(?!\s?(?:piezas|pzs|pz|pcs|pieces|pza))", text):
+        value = num.group(1)
+        if len(value) == 4 and 2000 <= int(value) <= 2035:
+            continue  # a year, not a set number
+        return Built(f"lego {value}")
+    return _amb("LEGO set number not stated")
+
+
+# ------------------------------------------------------------------------------------------------
+# Rule table.  Order matters only for hits that start at the same position.
+# ------------------------------------------------------------------------------------------------
+
+_SAMSUNG = r"(?:\bgalaxy\s|\bsamsung\s(?:galaxy\s)?)"
+
+
+def _r(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern)
+
+
+MODEL_RULES: tuple[ModelRule, ...] = (
+    # Apple
+    ModelRule("iphone", "apple", "phone", _r(r"\biphone\s?(?P<num>1[1-7]|xs|xr|x|se|air)(?P<e>e)?(?!\w)"), _iphone),
+    ModelRule("airpods", "apple", "audio", _r(r"\bairpods(?:\s(?P<line>pro|max))?(?!\w)"), _airpods),
+    ModelRule("apple_watch", "apple", "smartwatch", _r(r"\b(?:apple\swatch|iwatch)(?!\w)"), _apple_watch),
+    ModelRule("ipad", "apple", "tablet", _r(r"\bipad(?:\s(?P<line>air|pro|mini))?(?!\w)"), _ipad),
+    ModelRule("macbook", "apple", "laptop", _r(r"\bmacbook(?:\s(?P<line>air|pro))?(?!\w)"), _macbook),
+    ModelRule(
+        "apple_pencil", "apple", "tablet", _r(r"\bapple\spencil(?!\w)"), _apple_pencil, accessory_type="stylus"
+    ),
+    # Samsung
+    ModelRule("galaxy_s", "samsung", "phone", _r(_SAMSUNG + r"s\s?(?P<num>[12]\d)(?P<plus>\+)?(?!\w)"), _galaxy_s),
+    ModelRule(
+        "galaxy_am", "samsung", "phone", _r(_SAMSUNG + r"(?P<line>[am])\s?(?P<num>\d{2})(?P<s>s)?(?!\w)"), _galaxy_am
+    ),
+    ModelRule(
+        "galaxy_z",
+        "samsung",
+        "phone",
+        _r(r"(?:\bgalaxy\s(?:z\s)?|\bsamsung\s(?:galaxy\s)?(?:z\s)?|\bz\s)(?P<kind>fold|flip)\s?(?P<num>\d)(?!\w)"),
+        _galaxy_z,
+    ),
+    ModelRule(
+        "galaxy_tab",
+        "samsung",
+        "tablet",
+        _r(_SAMSUNG + r"tab\s(?P<line>s|a)\s?(?P<num>\d{1,2})(?P<plus>\+)?(?!\w)"),
+        _galaxy_tab,
+    ),
+    ModelRule("galaxy_watch", "samsung", "smartwatch", _r(_SAMSUNG + r"watch\s?(?P<num>\d)?(?!\w)"), _galaxy_watch),
+    ModelRule("galaxy_buds", "samsung", "audio", _r(_SAMSUNG + r"buds\s?(?P<num>\d)?(?P<plus>\+)?(?!\w)"), _galaxy_buds),
+    # Xiaomi
+    ModelRule("redmi_note", "xiaomi", "phone", _r(r"\bredmi\snote\s?(?P<num>\d{1,2})(?P<s>s|t)?(?!\w)"), _redmi_note),
+    ModelRule("redmi", "xiaomi", "phone", _r(r"\bredmi\s(?!note)(?P<num>a?\d{1,2}c?)(?!\w)"), _redmi),
+    ModelRule("poco", "xiaomi", "phone", _r(r"\bpoco\s(?P<line>[xfmc])\s?(?P<num>\d)(?!\w)"), _poco),
+    ModelRule("xiaomi_num", "xiaomi", "phone", _r(r"\bxiaomi\s(?:mi\s)?(?P<num>1[0-7])(?P<t>t)?(?!\w)"), _xiaomi_num),
+    # Motorola
+    ModelRule(
+        "moto_g", "motorola", "phone", _r(r"\b(?:motorola\s(?:moto\s)?|moto\s?)g\s?(?P<num>\d{1,3})(?!\w)"), _moto_g
+    ),
+    ModelRule(
+        "moto_edge",
+        "motorola",
+        "phone",
+        _r(r"\b(?:motorola\s|moto\s)(?:moto\s)?edge(?:\s(?P<num>\d{2,4}))?(?!\w)"),
+        _moto_edge,
+    ),
+    ModelRule(
+        "razr", "motorola", "phone", _r(r"\b(?:motorola\s|moto\s)?razr(?:\s?(?P<num>\d{2}))?(?P<plus>\+)?(?!\w)"), _razr
+    ),
+    # Google / others
+    ModelRule("pixel", "google", "phone", _r(r"\bpixel\s?(?P<num>\d{1,2})(?P<a>a)?(?!\w)"), _pixel),
+    ModelRule(
+        "huawei",
+        "huawei",
+        "phone",
+        _r(r"\bhuawei\s(?P<line>nova|mate|pura|p)\s?(?P<num>\d{1,2})(?P<i>i|e|s|x)?(?!\w)"),
+        _huawei,
+    ),
+    ModelRule(
+        "honor",
+        "honor",
+        "phone",
+        _r(r"\bhonor\s(?:magic\s?(?P<mnum>\d)|x\s?(?P<xnum>\d{1,2})(?P<xs>[a-z])?|(?P<num>\d{2,3}))(?!\w)"),
+        _honor,
+    ),
+    ModelRule(
+        "oppo",
+        "oppo",
+        "phone",
+        _r(
+            r"\boppo\s(?:reno\s?(?P<rnum>\d{1,2})(?P<rf>[fz])?|a\s?(?P<anum>\d{1,2})(?P<as>[a-z])?"
+            r"|find\sx\s?(?P<fnum>\d))(?!\w)"
+        ),
+        _oppo,
+    ),
+    ModelRule(
+        "realme",
+        "realme",
+        "phone",
+        _r(
+            r"\brealme\s(?:(?P<num>\d{1,2})(?P<suf>i|t|x|s)?|c\s?(?P<cnum>\d{2})|gt\s?(?P<gnum>\d)"
+            r"|note\s(?P<nnum>\d{2}))(?!\w)"
+        ),
+        _realme,
+    ),
+    ModelRule(
+        "oneplus",
+        "oneplus",
+        "phone",
+        _r(r"\boneplus\s(?:nord\s(?:ce\s?)?(?P<nnum>\d)|(?P<num>\d{1,2})(?P<t>[tr])?)(?!\w)"),
+        _oneplus,
+    ),
+    # Consoles
+    ModelRule("ps5", "sony", "console", _r(r"\bps5(?!\w)"), _ps5),
+    ModelRule("ps4", "sony", "console", _r(r"\bps4(?!\w)"), _ps4),
+    ModelRule(
+        "ps_portal", "sony", "console", _r(r"\b(?:playstation|ps)\s?portal(?!\w)"), _const("playstation portal")
+    ),
+    ModelRule(
+        "dualsense",
+        "sony",
+        "console",
+        _r(r"\bdualsense(?:\s(?P<edge>edge))?(?!\w)"),
+        _dualsense,
+        accessory_type="controller",
+    ),
+    ModelRule(
+        "dualshock", "sony", "console", _r(r"\bdualshock\s?4?(?!\w)"), _const("dualshock 4"), accessory_type="controller"
+    ),
+    ModelRule("xbox_series", "microsoft", "console", _r(r"\bxbox\sseries\s(?P<v>x|s)(?!\w)"), _xbox_series),
+    ModelRule("xbox_one", "microsoft", "console", _r(r"\bxbox\sone(?:\s(?P<v>x|s))?(?!\w)"), _xbox_one),
+    ModelRule(
+        "switch", "nintendo", "console", _r(r"\bnintendo\sswitch(?!\w)|\bswitch\s(?=oled|lite|2(?!\d))"), _switch
+    ),
+    ModelRule(
+        "joycon",
+        "nintendo",
+        "console",
+        _r(r"\bjoycons?(?!\w)"),
+        _const(None, "Joy-Con: single controller vs pair cannot be told apart reliably"),
+        accessory_type="controller",
+    ),
+    ModelRule("steam_deck", "valve", "handheld_pc", _r(r"\bsteam\sdeck(?!\w)"), _steam_deck),
+    ModelRule("rog_ally", "asus", "handheld_pc", _r(r"\brog\sally(?:\s(?P<x>x))?(?!\w)"), _rog_ally),
+    ModelRule("legion_go", "lenovo", "handheld_pc", _r(r"\blegion\sgo(?:\s(?P<v>s|2))?(?!\w)"), _legion_go),
+    # GPUs
+    ModelRule("rtx", "nvidia", "gpu", _r(r"\b(?:geforce\s)?rtx\s?(?P<num>[2-5]0[5-9]0)(?!\w)"), _rtx),
+    ModelRule("radeon", "amd", "gpu", _r(r"\b(?:radeon\s)?rx\s?(?P<num>[5-9]\d{3})(?!\w)"), _radeon),
+    # Cameras / drones
+    ModelRule("gopro", "gopro", "camera", _r(r"\bgopro\s(?:hero\s?)?(?P<num>\d{1,2})(?!\w)"), _gopro),
+    ModelRule("gopro_max", "gopro", "camera", _r(r"\bgopro\smax(?!\w)"), _gopro_max),
+    ModelRule(
+        "dji",
+        "dji",
+        "drone",
+        _r(
+            r"\bdji\s(?P<line>mini|air|avata|mavic|neo|flip|osmo\spocket|osmo\saction|osmo\smobile|osmo\s360)"
+            r"(?:\s?(?P<num>\d{1,2}s?))?(?!\w)"
+        ),
+        _dji,
+    ),
+    ModelRule(
+        "canon",
+        "canon",
+        "camera",
+        _r(
+            r"\bcanon\s(?:eos\s)?(?:r\s?(?P<rnum>\d{1,3}|p)|rebel\s(?P<reb>t\d{1,2}i?|sl\d)|(?P<dnum>\d{2,4}d))"
+            r"(?:\s(?P<ii>ii|mark\sii|mark\s2))?(?!\w)"
+        ),
+        _canon,
+    ),
+    ModelRule(
+        "nikon",
+        "nikon",
+        "camera",
+        _r(r"\bnikon\s(?:z\s?(?P<z>\d{1,2}|fc|f)|d\s?(?P<d>\d{3,4}))(?:\s(?P<ii>iii|ii))?(?!\w)"),
+        _nikon,
+    ),
+    ModelRule(
+        "fujifilm",
+        "fujifilm",
+        "camera",
+        _r(r"\bfuji(?:film)?\sx\s?(?P<m>t\d{1,2}|s\d{1,2}|e\d|100vi|100v|100f|h2s|h2|m5)(?!\w)"),
+        _fuji,
+    ),
+    ModelRule(
+        "instax",
+        "fujifilm",
+        "camera",
+        _r(r"\binstax\s(?:mini\s(?P<mini>\d{1,2}\+?|evo)|wide\s(?P<wide>\d{3})|square\s(?P<sq>sq\d{1,2}))(?!\w)"),
+        _instax,
+    ),
+    ModelRule(
+        "sony_alpha",
+        "sony",
+        "camera",
+        _r(r"\bsony\s(?:alpha\s)?a\s?(?P<num>7c|7r|7s|7|9|1|6[0-7]00)(?:\s?(?P<gen>iv|iii|ii|v))?(?!\w)"),
+        _sony_alpha,
+    ),
+    ModelRule("sony_zv", "sony", "camera", _r(r"\bzv\s?(?P<m>e10|e1|1f|1)(?:\s?(?P<ii>ii))?(?!\w)"), _sony_zv),
+    # Audio / wearables / e-readers
+    ModelRule("sony_wh", "sony", "audio", _r(r"\b(?P<t>wh|wf)\s?1000\s?xm\s?(?P<n>[2-6])(?!\w)"), _sony_wh),
+    ModelRule(
+        "bose", "bose", "audio", _r(r"\bbose\s(?:quiet\s?comfort|qc)\s?(?P<rest>45|35|ultra|earbuds|se)?(?!\w)"), _bose
+    ),
+    ModelRule(
+        "jbl",
+        "jbl",
+        "audio",
+        _r(
+            r"\bjbl\s(?P<line>flip|charge|go|clip|xtreme|boombox|partybox|tune|live|vibe|wave)"
+            r"\s?(?P<num>\d{1,3})?(?:bt|nc)?(?!\w)"
+        ),
+        _jbl,
+    ),
+    ModelRule(
+        "beats",
+        "beats",
+        "audio",
+        _r(
+            r"\b(?:beats\s)?(?P<rest>studio\spro|studio\sbuds\+?|solo\s?(?:4|3|buds)|fit\spro|pill|"
+            r"powerbeats\spro(?:\s2)?)(?!\w)"
+        ),
+        _beats,
+    ),
+    ModelRule(
+        "sennheiser",
+        "sennheiser",
+        "audio",
+        _r(r"\bsennheiser\smomentum\s(?P<num>4|3)(?!\w)"),
+        lambda m, _t: Built(f"sennheiser momentum {m['num']}"),
+    ),
+    ModelRule(
+        "garmin",
+        "garmin",
+        "smartwatch",
+        _r(r"\b(?:garmin\s)?(?P<line>forerunner|fenix|venu|instinct|epix|vivoactive)\s?(?P<num>\d{1,3}[sx]?)?(?!\w)"),
+        _garmin,
+    ),
+    ModelRule(
+        "kindle",
+        "amazon",
+        "ereader",
+        _r(r"\bkindle(?:\s(?P<line>paperwhite|oasis|scribe|colorsoft|basic))?(?!\w)"),
+        _kindle,
+    ),
+    ModelRule(
+        "echo", "amazon", "audio", _r(r"\becho\s(?P<line>dot|pop|show|studio|spot)(?:\s(?P<num>\d{1,2}))?(?!\w)"), _echo
+    ),
+    # Tools / toys / sneakers
+    ModelRule(
+        "dewalt",
+        "dewalt",
+        "tool",
+        _r(r"\b(?P<code>dc[a-z]{1,3}\d{3,4}[a-z]{0,2}\d?)(?!\w)"),
+        _code_if_brand("dewalt", lambda m: m["code"]),
+    ),
+    ModelRule(
+        "makita",
+        "makita",
+        "tool",
+        _r(r"\b(?P<code>(?:x[a-z]{2,3}\d{2,3}|d[a-z]{2}\d{3}|g[a-z]{2}\d{2,3})[a-z]{0,3}\d?)(?!\w)"),
+        _code_if_brand("makita", lambda m: m["code"]),
+    ),
+    ModelRule(
+        "milwaukee",
+        "milwaukee",
+        "tool",
+        _r(r"\b(?P<a>2\d{3})\s(?P<b>2\d)(?!\w)"),
+        _code_if_brand("milwaukee", lambda m: f"{m['a']}-{m['b']}"),
+    ),
+    ModelRule("lego", "lego", "toy", _r(r"\blego(?!\w)"), _lego),
+    ModelRule(
+        "nike_style",
+        "nike",
+        "sneakers",
+        _r(r"\b(?P<a>[a-z]{2}\d{4})\s(?P<b>\d{3})(?!\w)"),
+        _code_if_brand(r"nike|jordan", lambda m: f"{m['a']}-{m['b']}"),
+    ),
+    ModelRule(
+        "adidas_style",
+        "adidas",
+        "sneakers",
+        _r(r"\b(?P<code>[a-z]{2}\d{4})(?!\w)"),
+        _code_if_brand(r"adidas|yeezy", lambda m: m["code"]),
+    ),
+)
+
+#: Rules whose match is an exact product code (SKU / style code / set number).  These codes often come
+#: late in the title, so the "unknown words before the model" ambiguity guard does not apply.
+EXACT_CODE_RULES: frozenset[str] = frozenset({"dewalt", "makita", "milwaukee", "lego", "nike_style", "adidas_style"})
+
+#: model name -> accessory type, for rules whose recognised model is itself an accessory product.
+ACCESSORY_MODELS: dict[str, str] = {
+    "dualsense": "controller",
+    "dualsense edge": "controller",
+    "dualshock 4": "controller",
+    "apple pencil 1": "stylus",
+    "apple pencil 2": "stylus",
+    "apple pencil pro": "stylus",
+    "apple pencil usb c": "stylus",
+}
+
+
+def find_model_hits(text: str) -> list[ModelHit]:
+    """All non-overlapping model-family hits in normalized ``text``, ordered by position."""
+    raw_hits: list[tuple[int, int, ModelHit]] = []
+    for order, rule in enumerate(MODEL_RULES):
+        for m in rule.pattern.finditer(text):
+            built = rule.build(m, text)
+            if built is None:
+                continue
+            raw_hits.append(
+                (
+                    m.start(),
+                    order,
+                    ModelHit(
+                        rule=rule.name,
+                        brand=rule.brand,
+                        category=rule.category,
+                        model=built.model,
+                        start=m.start(),
+                        end=m.end(),
+                        tokens=built.tokens,
+                        accessory_type=rule.accessory_type,
+                        notes=(built.note,) if built.note else (),
+                    ),
+                )
+            )
+    raw_hits.sort(key=lambda item: (item[0], item[1]))
+    hits: list[ModelHit] = []
+    last_end = -1
+    for _start, _order, hit in raw_hits:
+        if hit.start < last_end:
+            continue  # overlaps an earlier (or same-position, higher-priority) hit
+        hits.append(hit)
+        last_end = hit.end
+    return hits
+
+
+def refine_model(model: str | None, storage_gb: int | None) -> tuple[str | None, str | None]:
+    """Storage-based disambiguation that the hardware line-up makes unambiguous.
+
+    Returns (model, note).  Only facts about the official configurations are used:
+    the original PS5 shipped with 825GB (Slim: 1TB); Steam Deck LCD came in 64/256/512GB and the
+    OLED in 512GB/1TB.
+    """
+    if model == "ps5" and storage_gb == 1024:
+        return "ps5 slim", "1TB PS5 inferred as Slim (the original PS5 shipped with 825GB)"
+    if model == "steam deck":
+        if storage_gb in (64, 256):
+            return "steam deck lcd", f"{storage_gb}GB Steam Deck inferred as LCD (OLED starts at 512GB)"
+        if storage_gb == 1024:
+            return "steam deck oled", "1TB Steam Deck inferred as OLED (LCD tops out at 512GB)"
+        return None, "Steam Deck display (LCD/OLED) not stated"
+    return model, None
+
+
+# ------------------------------------------------------------------------------------------------
+# Identity dimensions: attributes that make two listings of the same model different products.
+# ------------------------------------------------------------------------------------------------
+
+IDENTITY_LABELS: dict[str, str] = {
+    "edition": "edition",
+    "connectivity": "connectivity",
+    "screen": "screen size",
+    "case_size": "case size",
+    "ram": "RAM",
+    "vram": "VRAM",
+    "lens": "lens kit",
+    "power": "battery kit",
+    "size": "size",
+}
+
+_INCH_TOKEN = re.compile(r"\d{1,2}in")
+_MM_TOKEN = re.compile(r"\d{2}mm")
+_VRAM_TOKEN = re.compile(r"vram\d{1,2}gb")
+_SIZE_TOKEN = re.compile(r"talla\d{2}(?:\.5)?")
+
+
+def identity_dims(
+    category: str | None, model: str | None, tokens: list[str] | tuple[str, ...], ram_gb: int | None = None
+) -> dict[str, str]:
+    """Map variant tokens to identity dimensions for ``category`` (dimension -> value).
+
+    Only dimensions that change what the product *is* (and therefore its price) are returned, e.g.
+    PS5 digital vs disc, iPad Wi-Fi vs cellular, Apple Watch 41mm vs 45mm, MacBook RAM.
+    """
+    toks = set(tokens)
+    dims: dict[str, str] = {}
+    if category == "console" and model in EDITION_MODELS:
+        if "digital" in toks:
+            dims["edition"] = "digital"
+        elif "disc" in toks:
+            dims["edition"] = "disc"
+    if category in ("tablet", "smartwatch"):
+        if "cellular" in toks:
+            dims["connectivity"] = "cellular"
+        elif category == "tablet" and "wifi" in toks:
+            dims["connectivity"] = "wifi"
+        elif category == "smartwatch" and "gps" in toks:
+            dims["connectivity"] = "gps"
+    if category in ("tablet", "laptop"):
+        sizes = sorted(t for t in toks if _INCH_TOKEN.fullmatch(t))
+        if len(sizes) == 1:
+            dims["screen"] = sizes[0]
+    if category == "smartwatch":
+        mms = sorted(t for t in toks if _MM_TOKEN.fullmatch(t))
+        if len(mms) == 1:
+            dims["case_size"] = mms[0]
+    if category == "laptop":
+        if ram_gb:
+            dims["ram"] = f"ram{ram_gb}gb"
+        else:
+            rams = sorted(t for t in toks if re.fullmatch(r"ram\d{1,3}gb", t))
+            if len(rams) == 1:
+                dims["ram"] = rams[0]
+    if category == "gpu":
+        vrams = sorted(t for t in toks if _VRAM_TOKEN.fullmatch(t))
+        if len(vrams) == 1:
+            dims["vram"] = vrams[0]
+    if category == "camera":
+        if "body_only" in toks and "kit" not in toks:
+            dims["lens"] = "body_only"
+        elif "lens_kit" in toks and "body_only" not in toks:
+            dims["lens"] = "lens_kit"
+    if category == "tool":
+        if "tool_only" in toks and "with_battery" not in toks:
+            dims["power"] = "tool_only"
+        elif "with_battery" in toks and "tool_only" not in toks:
+            dims["power"] = "with_battery"
+    if category == "sneakers":
+        sizes = sorted(t for t in toks if _SIZE_TOKEN.fullmatch(t))
+        if len(sizes) == 1:
+            dims["size"] = sizes[0]
+    return dims
