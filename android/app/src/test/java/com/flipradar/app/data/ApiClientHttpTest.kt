@@ -1,7 +1,5 @@
 package com.flipradar.app.data
 
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -11,7 +9,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
-import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.util.Collections
 
@@ -20,29 +17,22 @@ import java.util.Collections
  * bearer header handling, query encoding, PATCH bodies, FastAPI error details, redirects, bad JSON.
  */
 class ApiClientHttpTest {
-    private lateinit var server: HttpServer
+    private lateinit var server: TinyHttpServer
     private lateinit var base: String
     private val requests = Collections.synchronizedList(ArrayList<Recorded>())
 
     data class Recorded(val method: String, val path: String, val query: String?, val auth: String?, val body: String)
 
-    private fun respond(ex: HttpExchange, status: Int, body: String, headers: Map<String, String> = emptyMap()) {
-        val bytes = body.toByteArray(Charsets.UTF_8)
-        ex.responseHeaders.add("Content-Type", "application/json")
-        headers.forEach { (k, v) -> ex.responseHeaders.add(k, v) }
-        ex.sendResponseHeaders(status, if (bytes.isEmpty()) -1 else bytes.size.toLong())
-        if (bytes.isNotEmpty()) ex.responseBody.use { it.write(bytes) }
-        ex.close()
-    }
+    private fun respond(@Suppress("UNUSED_PARAMETER") ex: TinyHttpServer.Request, status: Int, body: String,
+                        headers: Map<String, String> = emptyMap()) = TinyHttpServer.Response(status, body, headers)
 
     @Before
     fun start() {
-        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/") { ex ->
-            val body = ex.requestBody.readBytes().toString(Charsets.UTF_8)
-            val path = ex.requestURI.path
-            val auth = ex.requestHeaders.getFirst("Authorization")
-            requests.add(Recorded(ex.requestMethod, path, ex.requestURI.rawQuery, auth, body))
+        server = TinyHttpServer { ex ->
+            val body = ex.body
+            val path = ex.path
+            val auth = ex.header("Authorization")
+            requests.add(Recorded(ex.method, path, ex.rawQuery, auth, body))
             val authorized = auth == "Bearer s3cret-token"
             when {
                 path == "/health" -> respond(ex, 200, """{"status": "ok", "version": "0.1.0", "api_version": "1", "database": "sqlite", "time": "2026-11-01T00:00:00Z"}""")
@@ -51,24 +41,24 @@ class ApiClientHttpTest {
                 !authorized -> respond(ex, 401, """{"detail": "Invalid or missing API token"}""")
                 path == "/api/v1/auth/check" -> respond(ex, 200, """{"ok": true, "token_name": "phone", "auth_required": true}""")
                 path == "/api/v1/opportunities" -> respond(ex, 200, """{"items": [{"id": 1, "product_title": "Switch", "net_profit_cents": 1500, "score": 70}], "total": 1, "limit": 30, "offset": 0}""")
-                path == "/api/v1/opportunities/5" && ex.requestMethod == "PATCH" ->
+                path == "/api/v1/opportunities/5" && ex.method == "PATCH" ->
                     respond(ex, 200, """{"id": 5, "status": "${JSONObject(body).getString("status")}"}""")
                 path == "/api/v1/calculator/profit" -> respond(
                     ex, 422,
                     """{"detail": [{"type": "greater_than_equal", "loc": ["body", "buy_price_cents"], "msg": "Input should be greater than or equal to 0"}]}""",
                 )
                 path == "/api/v1/notifications" -> respond(ex, 200, "[]")
-                path == "/api/v1/alerts/3" && ex.requestMethod == "DELETE" -> respond(ex, 200, """{"ok": true, "message": "deleted"}""")
+                path == "/api/v1/alerts/3" && ex.method == "DELETE" -> respond(ex, 200, """{"ok": true, "message": "deleted"}""")
                 else -> respond(ex, 404, """{"detail": "Not Found"}""")
             }
         }
         server.start()
-        base = "http://127.0.0.1:${server.address.port}"
+        base = "http://127.0.0.1:${server.port}"
     }
 
     @After
     fun stop() {
-        server.stop(0)
+        server.stop()
     }
 
     private fun client(token: String? = "s3cret-token", path: String = "") = ApiClient(base + path, token, 3_000, 3_000)

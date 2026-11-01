@@ -340,7 +340,7 @@ class ApiModelsTest {
         assertFalse(search.has("category_hint"))
 
         val update = InventoryUpdate(status = "listed").toJson()
-        assertEquals(setOf("status"), update.keySet())
+        assertEquals(setOf("status"), update.keys().asSequence().toSet())
     }
 
     @Test

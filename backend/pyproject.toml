@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "flipradar"
 version = "0.1.0"
 description = "FLIP RADAR - resale arbitrage intelligence for the Mexican market (self-hosted, zero mandatory cost)"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
