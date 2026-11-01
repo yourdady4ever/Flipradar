@@ -2,6 +2,11 @@
 
 Priority: **P1** = needed for confident real-world use, **P2** = valuable, **P3** = nice to have.
 
+## P0: fix the open regression findings
+
+- [ ] Work through [`docs/OPEN_REVIEW_FINDINGS.md`](docs/OPEN_REVIEW_FINDINGS.md), high severity
+  first. For PENDING items, reproduce before fixing. Add a regression test for each.
+
 ## P1: verify with real accounts and networks (the build sandbox could not reach these hosts)
 
 - [ ] **Mercado Libre live test.** Create a DevCenter app, set `FLIPRADAR_ML_CLIENT_ID`/`SECRET`, run

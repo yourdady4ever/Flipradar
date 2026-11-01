@@ -14,15 +14,30 @@ exception is the live third-party APIs, which that environment's network policy 
 
 | Check | Result | How to reproduce |
 |---|---|---|
-| Backend unit and integration tests | **868 passed**, hermetic (a guard blocks DNS and outbound connections) | `cd backend && ../.venv/bin/python -m pytest` |
+| Backend unit and integration tests | **1326 passed**, hermetic (a guard blocks DNS and outbound connections) | `cd backend && ../.venv/bin/python -m pytest` |
 | Lint | ruff clean | `ruff check flipradar tests scripts` |
 | Live end-to-end over HTTP (demo data) | **74/74 checks passed**: auth, every list/detail, calculator, buy → inventory → sale (realized profit equals predicted profit to the centavo), analytics, alerts, tracked searches, CSV import (normalized and clustered), SSRF refusals | `backend/scripts/e2e_check.py --mutate` |
-| Web dashboard in Chromium (Playwright) | **21/21 steps passed**: every view, create/edit/delete flows, CSV import, 360 px phone width, no console or CSP errors | `node backend/tests/web_smoke/smoke.mjs` |
+| Web dashboard in Chromium (Playwright) | **26/26 steps passed**: every view, create/edit/delete flows, CSV import, 360 px phone width, no console or CSP errors | `node backend/tests/web_smoke/smoke.mjs` |
 | Android app's real `ApiClient` + parsers against the live server (JVM) | **28/28 passed** | `android/scripts/run-contract-check.sh` |
-| Android JVM unit tests | **46 passed** | `android/scripts/run-unit-tests.sh` |
+| Android JVM unit tests | **77 passed** | `android/scripts/run-unit-tests.sh` |
 | Android APK, offline toolchain | Signed debug APK, about 0.86 MB, minSdk 26 / targetSdk 36; `apksigner verify` OK | `android/scripts/build-offline.sh` |
 | Android build, standard Gradle/AGP 8.13 + unit tests | **Green on GitHub Actions** | `.github/workflows/ci.yml`, job `android-gradle` |
 | Fresh `pip install -e backend[dev]` + wheel contents | OK (web assets included) | see `CONTINUATION.md` |
+
+## Reviews
+
+* **First adversarial review:** 8 specialist reviewers plus independent verifiers. 68 findings: **67
+  confirmed and fixed**, each with a regression test that failed before the fix. One was refuted
+  because it was already fixed.
+* **Second (regression) review of those fixes:** 26 findings, 8 confirmed and 18 still unverified
+  when the session ended. **Not yet fixed.** Every one is listed with its failure scenario and
+  suggested fix in [`docs/OPEN_REVIEW_FINDINGS.md`](docs/OPEN_REVIEW_FINDINGS.md); start there.
+  The most important are:
+  - band or case words turning real Apple Watch listings into accessories;
+  - Switch OLED/Lite titles losing their model;
+  - import duties missing from the inventory cost of bought eBay items;
+  - the stale-buy sweep resetting watched opportunities to NEW;
+  - rate limiting skipped with a fake bearer header.
 
 ## Components
 
