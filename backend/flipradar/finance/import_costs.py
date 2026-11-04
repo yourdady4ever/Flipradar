@@ -124,6 +124,10 @@ def estimate_import_costs(
 ) -> dict[str, Any]:
     """Deterministic duty estimate.  Returns a dict with exactly the fields of ``schemas.ImportCostOut``.
 
+    When the customs value is above the courier-regime limit (``formal_import_required``) duties are NOT
+    estimated: ``duty_rate_bp`` and ``duties_mxn_cents`` are None (never a guessed 0), and the notes say a
+    formal import through a customs broker is required.
+
     Raises KeyError for an unknown ``rule_key`` and ValueError for negative amounts / non-positive rate.
     """
     if item_value_usd_cents < 0 or shipping_usd_cents < 0:
@@ -134,7 +138,9 @@ def estimate_import_costs(
     customs_usd = int(item_value_usd_cents) + int(shipping_usd_cents)
     rule = select_rule(rule_key, customs_usd)
     customs_mxn = _cents(Decimal(customs_usd) * rate)
-    duties = _cents(Decimal(customs_usd) * rate * Decimal(rule.duty_rate_bp) / BP)
+    formal = bool(rule.formal_import_required)
+    duty_rate_bp: int | None = None if formal else rule.duty_rate_bp
+    duties: int | None = None if formal else _cents(Decimal(customs_usd) * rate * Decimal(rule.duty_rate_bp) / BP)
     notes = [
         *rule.notes,
         _ESTIMATE,
@@ -147,9 +153,10 @@ def estimate_import_costs(
         "customs_value_usd_cents": customs_usd,
         "usd_mxn_rate": str(rate),
         "fx_source": fx_source,
-        "duty_rate_bp": rule.duty_rate_bp,
+        "duty_rate_bp": duty_rate_bp,
         "duties_mxn_cents": duties,
         "customs_value_mxn_cents": customs_mxn,
+        "formal_import_required": formal,
         "notes": notes,
         "source_url": rule.source_url,
         "as_of": rule.as_of,

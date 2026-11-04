@@ -92,6 +92,9 @@ def profit(body: CalculatorIn, db: Session = Depends(get_db), settings: Settings
 
 @router.post("/import-costs", response_model=ImportCostOut)
 def import_costs(body: ImportCostIn, db: Session = Depends(get_db), settings: Settings = Depends(get_settings)) -> ImportCostOut:
+    """Courier-regime import duty estimate.  ``formal_import_required`` is true when the customs value is above
+    the courier-regime limit: a formal import (customs broker, pedimento) is needed, and ``duty_rate_bp`` /
+    ``duties_mxn_cents`` are null because the duties are not estimated (never a guessed 0)."""
     if body.rule_key not in rule_keys():
         raise HTTPException(422, f"unknown rule_key '{body.rule_key}' (available: {', '.join(rule_keys())})")
     if body.usd_mxn_rate:

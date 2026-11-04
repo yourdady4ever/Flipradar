@@ -302,6 +302,102 @@ export function importFxAttribution(out, fx) {
   return out.fx_source === `${fx.source} (${fx.rate_date})` ? fx.attribution : null;
 }
 
+/** An import estimate whose duties can be used as a cost.  A formal import (customs broker) is never estimated:
+ *  the server then sends formal_import_required and null duties. */
+export function importDutiesEstimated(out) {
+  return Boolean(out) && out.formal_import_required !== true && isInt(out.duties_mxn_cents);
+}
+
+/** FLIP RADAR product categories (backend normalize/vocab.CATEGORIES, same order). */
+export const CATEGORIES = ['phone', 'console', 'handheld_pc', 'laptop', 'tablet', 'audio', 'smartwatch', 'camera', 'drone', 'gpu', 'tool', 'toy', 'sneakers', 'ereader', 'other'];
+const CATEGORY_LABELS = { handheld_pc: 'Handheld PC', gpu: 'GPU', ereader: 'E-reader' };
+
+export function categoryLabel(category) {
+  const key = String(category ?? '');
+  if (CATEGORY_LABELS[key]) return CATEGORY_LABELS[key];
+  const text = key.replace(/_/g, ' ');
+  return text ? text.charAt(0).toUpperCase() + text.slice(1) : '';
+}
+
+/** Stored settings.category_fee_profiles -> editor rows, known categories first in CATEGORIES order. */
+export function categoryFeeRows(mapping) {
+  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)) return [];
+  const rank = (c) => {
+    const i = CATEGORIES.indexOf(c);
+    return i === -1 ? CATEGORIES.length : i;
+  };
+  return Object.keys(mapping)
+    .sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0))
+    .map((category) => {
+      const m = mapping[category] && typeof mapping[category] === 'object' ? mapping[category] : {};
+      return { category, new: typeof m.new === 'string' ? m.new : '', used: typeof m.used === 'string' ? m.used : '' };
+    });
+}
+
+/**
+ * Editor rows -> settings.category_fee_profiles, e.g. {console: {new: 'ml_clasica_1_2kg'}}.  A condition left empty
+ * is omitted (the default profile for that condition applies); a completely empty row is ignored.  Throws an Error
+ * whose `row` is the 0-based index of the offending row and `field` the input to fix ('category' or 'new').
+ */
+export function buildCategoryFeeProfiles(rows) {
+  const out = {};
+  (rows || []).forEach((r, i) => {
+    const category = String((r && r.category) || '').trim();
+    const neu = String((r && r.new) || '').trim();
+    const used = String((r && r.used) || '').trim();
+    const fail = (message, fieldName) => Object.assign(new Error(`Category fee profiles, row ${i + 1}: ${message}`), { row: i, field: fieldName });
+    if (!category) {
+      if (!neu && !used) return;
+      throw fail('choose a category', 'category');
+    }
+    if (Object.prototype.hasOwnProperty.call(out, category)) throw fail(`${categoryLabel(category)} is already mapped in an earlier row`, 'category');
+    if (!neu && !used) throw fail(`choose a fee profile for new or used ${categoryLabel(category)} units, or remove the row`, 'new');
+    out[category] = {};
+    if (neu) out[category].new = neu;
+    if (used) out[category].used = used;
+  });
+  return out;
+}
+
+/** Normalization notes of a listing detail (attributes.normalization_notes): an array (possibly empty), or null
+ *  when the object carries no attributes at all (a list row: the detail must be fetched). */
+export function listingNotes(listing) {
+  if (!listing || !listing.attributes || typeof listing.attributes !== 'object') return null;
+  const notes = listing.attributes.normalization_notes;
+  if (!Array.isArray(notes)) return [];
+  return notes.filter((n) => typeof n === 'string' && n.trim()).map((n) => n.trim());
+}
+
+/** 'unassigned' (no product), 'manual' (assigned from the review queue; can be undone) or 'automatic'. */
+export function assignmentState(listing) {
+  if (!listing || !isInt(listing.product_id)) return 'unassigned';
+  return listing.match_method === 'manual' ? 'manual' : 'automatic';
+}
+
+/** Initial product search for a listing: its extracted brand + model, else nothing (the user types). */
+export function suggestedProductQuery(listing) {
+  if (!listing) return '';
+  return [listing.brand, listing.model].filter((v) => typeof v === 'string' && v.trim()).map((v) => v.trim()).join(' ').slice(0, 200);
+}
+
+// Opportunity facts worth surfacing next to the cost breakdown: which commission was used and whether your own
+// sales were used as evidence.  Matched by key prefix so new keys of the same family render without a client change.
+// (The fee profile itself is already shown with the buy listing.)
+const FACT_GROUPS = [
+  { title: 'Marketplace commission', test: (k) => /^(commission|category_|marketplace_(fee|commission)|listing_type)/.test(k) || /(^|_)category_(fee|commission)/.test(k) },
+  { title: 'Your own sales as evidence', test: (k) => /(^|_)own_sales?(_|$)/.test(k) },
+];
+
+/** Facts grouped for display: [{title, rows: [[label, formatted value]]}]; groups without facts are left out. */
+export function factHighlights(facts) {
+  if (!facts || typeof facts !== 'object') return [];
+  const entries = Object.entries(facts).filter(([, v]) => v !== null && v !== undefined && v !== '');
+  return FACT_GROUPS.map((g) => ({
+    title: g.title,
+    rows: entries.filter(([k]) => g.test(k)).map(([k, v]) => [humanizeKey(k), fmtValue(k, v)]),
+  })).filter((g) => g.rows.length);
+}
+
 /* ============================================================================================
  * DOM helpers
  * ========================================================================================== */
@@ -944,6 +1040,7 @@ function stopPolling() {
 
 const VIEWS = {
   opportunities: { title: 'Opportunities', create: (m, r) => OpportunitiesView(m, r) },
+  review: { title: 'Review queue', create: (m, r) => ReviewView(m, r) },
   calculator: { title: 'Calculator', create: (m) => CalculatorView(m) },
   inventory: { title: 'Inventory', create: (m, r) => InventoryView(m, r) },
   analytics: { title: 'Analytics', create: (m) => AnalyticsView(m) },
@@ -1127,7 +1224,10 @@ function renderDemand(dm) {
 function renderListings(listings, caption = 'Listings') {
   if (!Array.isArray(listings) || !listings.length) return h('p', { class: 'muted' }, 'No listings.');
   return table([
-    { label: 'Title', cls: 'title-cell', cell: (l) => [extLink(l.url, l.title), l.is_demo ? [' ', demoBadge()] : null, l.is_suspicious ? [' ', badge('suspicious', 'crit')] : null] },
+    { label: 'Title', cls: 'title-cell', cell: (l) => [
+      extLink(l.url, l.title), l.is_demo ? [' ', demoBadge()] : null, l.is_suspicious ? [' ', badge('suspicious', 'crit')] : null,
+      l.match_method === 'manual' ? [' ', badge('assigned manually', 'accent', 'Assigned by hand from the review queue')] : null,
+      isInt(l.id) ? h('div', { class: 'sub' }, h('a', { href: `#/review/${l.id}` }, 'Listing details', h('span', { class: 'sr-only' }, ` for listing #${l.id}`))) : null] },
     { label: 'Source', cell: (l) => l.source_key },
     { label: 'Price (MXN)', num: true, cell: (l) => [fmtMoney(l.price_mxn_cents), l.currency && l.currency !== 'MXN' ? h('div', { class: 'sub muted' }, fmtMoney(l.price_cents, l.currency)) : null] },
     { label: 'Shipping', num: true, cell: (l) => (isInt(l.shipping_cents) ? fmtMoney(l.shipping_cents) : l.free_shipping ? 'Free' : 'unknown') },
@@ -1469,7 +1569,8 @@ function createOppDrawer({ onChanged }) {
     const buyToggle = button('Mark bought…', () => setOpen(bf.hidden), { attrs: { 'aria-expanded': 'false' } });
     const statusActions = oppStatusActions(d.status).map((a) => button(a.label, () => setStatus(d, a.to, a.message), { kind: a.primary ? 'primary' : '' }));
     const facts = d.facts && typeof d.facts === 'object' ? Object.entries(d.facts) : [];
-    setChildren(panel, 
+    const highlights = factHighlights(d.facts);
+    setChildren(panel,
       h('div', { class: 'drawer-head' }, h('h2', { id: titleId, tabindex: '-1' }, d.product_title), closeButton()),
       h('div', { class: 'badges' }, d.is_demo ? demoBadge() : null, statusBadge(d.status), riskBadge(d.risk_level), confidenceBadge(d.confidence), demandBadge(d.demand_level), d.category ? badge(d.category) : null),
       h('div', { class: 'actions' }, statusActions, buyToggle),
@@ -1494,6 +1595,10 @@ function createOppDrawer({ onChanged }) {
       ])),
       section('Expected sale price: derivation', renderDerivation(d)),
       section('Cost breakdown', renderBreakdown(d.cost_breakdown)),
+      highlights.length
+        ? section('Commission and evidence sources', h('div', { class: 'stack fact-groups' }, highlights.map((g) => h('div', null, h('h4', { class: 'small' }, g.title), kv(g.rows)))),
+          h('p', { class: 'muted small' }, 'Recorded with this opportunity at the last recompute. Every value is also listed under Facts.'))
+        : null,
       section('Score components', renderScore(d.score_components, d.score)),
       section('Risk flags', renderRiskFlags(d.risk_flags)),
       section('Demand', renderDemand(d.demand)),
@@ -1615,13 +1720,25 @@ function CalculatorView(main) {
     const fx = rate ? null : await api('/fx/latest').catch(() => null);
     const fxAttribution = importFxAttribution(out, fx);
     if (!alive()) return;
+    // A formal import (customs broker) is not estimated: the server sends null duties and formal_import_required.
+    const estimated = importDutiesEstimated(out);
+    const notEstimated = (text) => h('span', { class: 'tile-text' }, text);
+    const formalId = nextId('formal');
+    const useDuties = button('Use duties as import costs above', () => {
+      if (!estimated) return;
+      inputOf(form, 'import_costs').value = centsToInput(out.duties_mxn_cents);
+      inputOf(form, 'import_costs').focus();
+      toast('Import costs filled in the calculator.', 'success');
+    }, { attrs: { disabled: !estimated, 'aria-describedby': estimated ? null : formalId } });
     setChildren(impResult, card(`Estimate: ${out.rule_name}`,
       tiles([
-        ['Duties & taxes (MXN)', fmtMoney(out.duties_mxn_cents)],
+        ['Duties & taxes (MXN)', estimated ? fmtMoney(out.duties_mxn_cents) : notEstimated('not estimated (formal import required)')],
         ['Customs value (MXN)', fmtMoney(out.customs_value_mxn_cents)],
         ['Customs value (USD)', fmtMoney(out.customs_value_usd_cents, 'USD')],
-        ['Duty rate', fmtBp(out.duty_rate_bp)],
+        ['Duty rate', estimated && isInt(out.duty_rate_bp) ? fmtBp(out.duty_rate_bp) : notEstimated('not estimated')],
       ]),
+      estimated ? null : h('p', { id: formalId, class: 'notice notice-warn formal-import' },
+        'This customs value needs a formal import through a customs broker (agente aduanal). FLIP RADAR does not estimate those duties: ask a broker for a quote and enter it as import costs yourself.'),
       kv([
         ['Rule', h('code', null, out.rule_key)],
         ['USD → MXN', `${out.usd_mxn_rate} (${out.fx_source})`],
@@ -1630,11 +1747,7 @@ function CalculatorView(main) {
         ['As of', out.as_of || '—'],
       ]),
       Array.isArray(out.notes) && out.notes.length ? h('ul', { class: 'small' }, out.notes.map((n) => h('li', null, n))) : null,
-      h('div', { class: 'actions' }, button('Use duties as import costs above', () => {
-        inputOf(form, 'import_costs').value = centsToInput(out.duties_mxn_cents);
-        inputOf(form, 'import_costs').focus();
-        toast('Import costs filled in the calculator.', 'success');
-      }))));
+      h('div', { class: 'actions' }, useDuties)));
   });
 
   main.append(
@@ -2694,6 +2807,64 @@ function tiersText(tiers) {
   return tiers.map((t) => `${isInt(t.max_price_cents) ? `≤ ${fmtMoney(t.max_price_cents)}` : 'above'}: ${fmtMoney(t.fee_cents)}`).join('; ');
 }
 
+/** Editor for settings.category_fee_profiles: one row per category with a resale fee profile for new and for used
+ *  units.  Stored values the lists do not know (a deleted profile, a category set through the API) stay selectable. */
+function categoryFeeEditor(mapping, profiles) {
+  const rowsBox = h('div', { class: 'catfee-rows' });
+  const profileOpts = (current) => {
+    const opts = feeProfileOptions(profiles, 'Default profile');
+    if (current && !opts.some(([v]) => v === current)) opts.push([current, `${current} (missing profile)`]);
+    return opts;
+  };
+  const categoryOpts = (current) => {
+    const opts = [['', 'Choose a category'], ...CATEGORIES.map((c) => [c, categoryLabel(c)])];
+    if (current && !CATEGORIES.includes(current)) opts.push([current, `${current} (not a FLIP RADAR category)`]);
+    return opts;
+  };
+  function row(r = { category: '', new: '', used: '' }) {
+    const cat = select('catfee_category', categoryOpts(r.category), r.category);
+    const remove = h('button', { type: 'button', class: 'btn btn-sm btn-danger', on: { click: () => el.remove() } }, 'Remove');
+    const describe = () => remove.setAttribute('aria-label', `Remove the ${cat.value ? categoryLabel(cat.value) : 'empty'} category row`);
+    cat.addEventListener('change', describe);
+    describe();
+    const el = h('div', { class: 'catfee-row' },
+      field('Category', cat),
+      field('Profile for new / refurbished units', select('catfee_new', profileOpts(r.new), r.new)),
+      field('Profile for used units', select('catfee_used', profileOpts(r.used), r.used)),
+      remove);
+    return el;
+  }
+  for (const r of categoryFeeRows(mapping)) rowsBox.append(row(r));
+  const el = h('fieldset', { class: 'field-wide catfee' },
+    h('legend', null, 'Resale fee profile by category'),
+    h('p', { class: 'hint' }, 'Heavier items ship in a more expensive tier: map their categories to a matching fee profile. Categories without a row, and conditions left on “Default profile”, use the default profiles above.'),
+    rowsBox,
+    h('button', { type: 'button', class: 'btn btn-sm', on: { click: () => {
+      const r = row();
+      rowsBox.append(r);
+      r.querySelector('select').focus();
+    } } }, '+ Add category'));
+  function read() {
+    const rows = [...rowsBox.querySelectorAll('.catfee-row')];
+    for (const s of rowsBox.querySelectorAll('[aria-invalid]')) s.removeAttribute('aria-invalid');
+    try {
+      return buildCategoryFeeProfiles(rows.map((r) => ({
+        category: r.querySelector('select[name="catfee_category"]').value,
+        new: r.querySelector('select[name="catfee_new"]').value,
+        used: r.querySelector('select[name="catfee_used"]').value,
+      })));
+    } catch (err) {
+      const bad = rows[err.row] && rows[err.row].querySelector(`select[name="catfee_${err.field || 'category'}"]`);
+      if (bad) {
+        bad.setAttribute('aria-invalid', 'true');
+        bad.focus();
+      }
+      throw new InputError(err.message, 'category_fee_profiles');
+    }
+  }
+  return { el, read };
+}
+
 function SettingsView(main) {
   const alive = mountGuard();
   const settingsBox = h('div');
@@ -2712,11 +2883,13 @@ function SettingsView(main) {
     try {
       const st = await api('/settings');
       if (!alive()) return;
+      const catFees = categoryFeeEditor(st.category_fee_profiles, profiles);
       const f = h('form', { class: 'form-grid', novalidate: true, 'aria-label': 'Analysis settings' },
         h('p', { class: 'field-wide muted small' }, 'Changes to thresholds, pricing and resale fee profiles apply when opportunities are recomputed: press "Recompute opportunities" on Searches & Sources (a collection run only recomputes the products it touched).'),
         field('Min comparables', numInput('min_comparables', { min: '2', max: '100', value: String(st.min_comparables) }), { hint: 'Listings needed before an expected price is computed.' }),
         field('Comparable max age (days)', numInput('comparable_max_age_days', { min: '1', max: '365', value: String(st.comparable_max_age_days) })),
-        field('Buy listing max age (days)', numInput('buy_max_age_days', { min: '1', max: '90', value: String(st.buy_max_age_days ?? 3) }), { hint: 'A listing not seen within this many days is never an opportunity (it may be gone).' }),
+        field('Buy listing max age (days)', numInput('buy_max_age_days', { min: '1', max: '90', value: String(st.buy_max_age_days ?? 3) }), { hint: 'A collected listing not seen within this many days is never an opportunity (it may be gone).' }),
+        field('Manual / CSV listing max age (days)', numInput('manual_buy_max_age_days', { min: '1', max: '365', value: String(st.manual_buy_max_age_days ?? 30) }), { hint: 'Listings you entered yourself (manual entry or CSV import) are not re-collected, so they get their own, longer window.' }),
         field('Pricing strategy', select('pricing_strategy', [['competitive', 'Competitive: 25th percentile of comparable prices'], ['market', 'Market: median of comparable prices']], st.pricing_strategy), { hint: 'Used while fewer than "Min comparables" sold prices are known; otherwise their median is used.' }),
         field('Min ROI for opportunities (%)', pctInput('min_roi', { value: bpToInput(st.min_roi_bp) }), { hint: 'Listings below this ROI do not become opportunities.' }),
         field('Min net profit (MXN)', moneyInput('min_profit', { value: centsToInput(st.min_profit_cents) }), { hint: 'Listings below this net profit do not become opportunities.' }),
@@ -2725,7 +2898,12 @@ function SettingsView(main) {
         field('Shipping assumed when unknown (MXN)', moneyInput('unknown_shipping', { value: centsToInput(st.unknown_shipping_assumption_cents) }), { hint: 'Added to the buy cost when a listing does not report shipping (it is flagged "shipping unknown"). Empty = $0.' }),
         field('Calculator target ROI (%)', pctInput('target_roi', { value: bpToInput(st.target_roi_bp) }), { hint: 'Default target for the maximum buy price in the Calculator. It does not filter opportunities.' }),
         field('Manual USD → MXN rate', textInput('fx', { inputmode: 'decimal', value: st.fx_usd_mxn_manual || '', placeholder: 'only without Banxico' }), { hint: 'Used only when no automatic FX source is configured.' }),
+        checkField('Use exact Mercado Libre category commissions', checkbox('use_marketplace_category_fees', st.use_marketplace_category_fees ?? true),
+          'When the per-category commission has been fetched from Mercado Libre and cached, it replaces the fee profile’s generic commission. The opportunity detail shows which commission was used.'),
+        checkField('Use your own sales as sold-price evidence', checkbox('use_own_sales_as_evidence', st.use_own_sales_as_evidence ?? true),
+          'Sales you recorded in Inventory count as sold prices for the same product.'),
         checkField('Include demo data in analysis and lists', checkbox('include_demo', st.include_demo_data), 'Demo rows are always badged DEMO.'),
+        catFees.el,
         h('div', { class: 'field-wide' }, kv([
           ['AI provider', st.ai_provider],
           ['Background scheduler', st.scheduler_enabled ? 'enabled' : 'disabled'],
@@ -2739,6 +2917,10 @@ function SettingsView(main) {
           min_comparables: readInt(f, 'min_comparables', { required: true, min: 2, max: 100 }),
           comparable_max_age_days: readInt(f, 'comparable_max_age_days', { required: true, min: 1, max: 365 }),
           buy_max_age_days: readInt(f, 'buy_max_age_days', { required: true, min: 1, max: 90 }),
+          manual_buy_max_age_days: readInt(f, 'manual_buy_max_age_days', { required: true, min: 1, max: 365 }),
+          category_fee_profiles: catFees.read(),
+          use_marketplace_category_fees: readBool(f, 'use_marketplace_category_fees'),
+          use_own_sales_as_evidence: readBool(f, 'use_own_sales_as_evidence'),
           pricing_strategy: inputOf(f, 'pricing_strategy').value,
           min_roi_bp: readPct(f, 'min_roi', { required: true, max: 100000 }),
           min_profit_cents: readMoney(f, 'min_profit', { required: true }),

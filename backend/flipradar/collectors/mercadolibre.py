@@ -13,12 +13,19 @@ app can use (depending on the functional permissions enabled for it in the ML De
 
 Consequences: only listings attached to a catalog product are visible (no free-form used listings).
 
+Catalog refresh: :meth:`MercadoLibreCollector.refresh_catalog_products` re-polls ``/products/{id}/items`` for
+catalog products that are already tracked (``/items/{id}`` is restricted for third-party apps since 2026) and
+reports, per product, whether the answer was complete, so the service layer can mark listings that are no
+longer returned as ended - never after an error or a partial (paged) answer.
+
 Authentication (``POST /oauth/token``): a configured ``FLIPRADAR_ML_ACCESS_TOKEN`` is used as-is until it
 is rejected; otherwise ``grant_type=refresh_token`` (refresh tokens are SINGLE-USE: the newest one is
 kept in memory, exposed as :attr:`MercadoLibreCollector.rotated_refresh_token` and pushed to listeners
 registered with :func:`add_refresh_token_listener` so the service layer can persist it) and finally
 ``grant_type=client_credentials`` (undocumented, community-verified in 2026).  Tokens are cached until
-``expires_in - 300`` seconds.
+``expires_in - 300`` seconds.  :func:`exchange_authorization_code` turns the ``code`` of the manual
+authorization flow (``grant_type=authorization_code``, optional PKCE ``code_verifier``) into tokens; they go
+into the same cache and the new refresh token reaches the same listeners.
 """
 
 from __future__ import annotations
@@ -29,8 +36,8 @@ import math
 import re
 import time
 import weakref
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, ClassVar, Literal
@@ -52,6 +59,8 @@ ARTICLE_BASE_URL = "https://articulo.mercadolibre.com.mx/"
 MAX_CATALOG_PRODUCTS = 10
 MAX_SELLER_ENRICHMENT = 20
 MAX_SEARCH_LIMIT = 500
+#: Pages of ``/products/{id}/items`` read per product by :meth:`MercadoLibreCollector.refresh_catalog_products`.
+MAX_REFRESH_PAGES = 5
 LISTING_TYPE_LABELS = {"gold_special": "Clásica", "gold_pro": "Premium"}
 POLICY_MESSAGE = (
     "Mercado Libre denied access by policy (PolicyAgent) for this app. Enable the required functional "
@@ -202,11 +211,75 @@ def _picture_url(product: dict[str, Any]) -> str | None:
     return None
 
 
+def _item_id(item: dict[str, Any]) -> str | None:
+    return _str_or_none(item.get("item_id")) or _str_or_none(item.get("id"))
+
+
+def catalog_category_id(item: dict[str, Any], product: dict[str, Any]) -> str | None:
+    """The listing's ML category: the item's own ``category_id``, else the catalog product's (when reported)."""
+    return _str_or_none(item.get("category_id")) or _str_or_none(product.get("category_id"))
+
+
+def catalog_category_name(item: dict[str, Any], product: dict[str, Any]) -> str | None:
+    """Human category name exactly as the API reported it - never derived from an id or guessed.
+
+    In order: the item's ``category_name``; the catalog product's ``category_name`` when it describes the
+    listing's category (the product reports no ``category_id`` or the same one); the catalog product's
+    ``domain_name`` (e.g. "Fundas para celulares").  None when the API sent none of them.
+    """
+    name = _str_or_none(item.get("category_name"))
+    if name:
+        return name[:200]
+    product_category = _str_or_none(product.get("category_id"))
+    listing_category = catalog_category_id(item, product)
+    name = _str_or_none(product.get("category_name"))
+    if name and (product_category is None or product_category == listing_category):
+        return name[:200]
+    name = _str_or_none(product.get("domain_name"))
+    return name[:200] if name else None
+
+
+def catalog_product_hint(
+    product_id: str,
+    *,
+    name: str | None,
+    source_attributes: Mapping[str, Any] | None = None,
+    image_url: str | None = None,
+    category_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Rebuild the catalog-product fields :func:`map_catalog_item` needs from a STORED listing of that product.
+
+    Inverse of the mapping above: ``source_attributes`` is the stored ``RawListing.attributes`` (catalog
+    attributes under their upper-case ML ids plus the lower-case meta keys).  Only values that the API reported
+    earlier are carried over.  Lets a catalog refresh map items without one ``GET /products/{id}`` per product.
+    None without a name (an item cannot be mapped without the catalog title).
+    """
+    title = _str_or_none(name)
+    if not title or not _SAFE_PATH_ID.match(product_id or ""):
+        return None
+    source = source_attributes if isinstance(source_attributes, Mapping) else {}
+    attributes = [
+        {"id": key, "value_name": str(value)}
+        for key, value in source.items()
+        if isinstance(key, str) and key.isupper() and isinstance(value, (str, int, float)) and not isinstance(value, bool)
+    ]
+    product: dict[str, Any] = {"id": product_id, "name": title, "attributes": attributes}
+    for key in ("domain_id", "domain_name"):
+        value = _str_or_none(source.get(key))
+        if value:
+            product[key] = value
+    if _str_or_none(image_url):
+        product["pictures"] = [{"url": str(image_url).strip()}]
+    if _str_or_none(category_name):
+        product["category_name"] = str(category_name).strip()
+    return product
+
+
 def map_catalog_item(
     item: dict[str, Any], product: dict[str, Any], *, observed_at: datetime | None = None
 ) -> RawListing | None:
     """One ``/products/{id}/items`` result + its catalog product -> RawListing (None when unusable)."""
-    item_id = _str_or_none(item.get("item_id")) or _str_or_none(item.get("id"))
+    item_id = _item_id(item)
     price_cents = _to_cents(item.get("price"))
     currency = _str_or_none(item.get("currency_id"))
     title = _str_or_none(product.get("name"))
@@ -220,6 +293,7 @@ def map_catalog_item(
     meta = {
         "catalog_product_id": _str_or_none(product.get("id")),
         "domain_id": _str_or_none(product.get("domain_id")),
+        "domain_name": _str_or_none(product.get("domain_name")),
         "official_store_id": _str_or_none(item.get("official_store_id")),
         "logistic_type": _str_or_none(shipping.get("logistic_type")),
         "listing_type_label": LISTING_TYPE_LABELS.get(listing_type or ""),
@@ -251,7 +325,8 @@ def map_catalog_item(
         brand=attrs.get("BRAND"),
         model=attrs.get("MODEL"),
         gtin=_gtin_from(attrs.get("GTIN")),
-        category_id=_str_or_none(item.get("category_id")),
+        category_id=catalog_category_id(item, product),
+        category_name=catalog_category_name(item, product),
         attributes=attributes,
         seller_id=str(seller_id) if seller_id is not None and not isinstance(seller_id, bool) else None,
         location=location or None,
@@ -323,6 +398,35 @@ def parse_listing_fee(payload: Any, listing_type_id: str) -> dict[str, Any]:
         "currency": _str_or_none(entry.get("currency_id")),
         "raw": entry,
     }
+
+
+def _paging(data: Any) -> tuple[int | None, int | None]:
+    """(total, limit) from a paged response; None when not reported (or not a non-negative integer)."""
+    paging = data.get("paging") if isinstance(data, dict) else None
+    if not isinstance(paging, dict):
+        return None, None
+    total = _int_or_none(paging.get("total"))
+    limit = _int_or_none(paging.get("limit"))
+    return (total if total is not None and total >= 0 else None), (limit if limit is not None and limit > 0 else None)
+
+
+@dataclass
+class CatalogRefresh:
+    """Outcome of re-polling one catalog product's listings (``GET /products/{id}/items``).
+
+    ``ok``: the API answered - HTTP 200, or 404 (Mercado Libre's answer for "no active listings").
+    ``complete``: ``ok`` and the answer provably holds EVERY listing attached to the product (the reported
+    ``paging.total`` was covered and every result carried an id).  Only a complete answer may be used to
+    conclude that a listing missing from ``returned_ids`` ended.  ``returned_ids`` holds every item id of the
+    answer, also of items that could not be mapped (e.g. no price).
+    """
+
+    product_id: str
+    ok: bool = False
+    complete: bool = False
+    listings: list[RawListing] = field(default_factory=list)
+    returned_ids: set[str] = field(default_factory=set)
+    error: str | None = None
 
 
 def _looks_like_gtin(query: str) -> bool:
@@ -420,6 +524,12 @@ class MercadoLibreCollector(Collector):
         body = _json_or_none(response)
         if response.status_code != 200:
             error = body.get("error") if isinstance(body, dict) else None
+            if error == "invalid_grant" and form.get("grant_type") == "authorization_code":
+                raise CollectorError(
+                    "authorization code rejected (invalid_grant). Codes are single-use and expire after a few "
+                    "minutes, and redirect_uri (and code_verifier, with PKCE) must match the authorization request "
+                    "exactly; authorize again and paste the new code"
+                )
             if error == "invalid_grant":
                 raise CollectorError(
                     "refresh token rejected (invalid_grant). Mercado Libre refresh tokens are single-use and "
@@ -524,6 +634,54 @@ class MercadoLibreCollector(Collector):
             state.access_token, state.expires_at = None, 0.0
             raise CollectorError("Mercado Libre authentication failed: " + "; ".join(errors))
 
+    async def exchange_authorization_code(
+        self, code: str, redirect_uri: str, *, code_verifier: str | None = None
+    ) -> dict[str, Any]:
+        """``grant_type=authorization_code``: trade the ``code`` of the manual authorization flow for tokens.
+
+        The access token goes into the process-wide token cache (later requests use it) and the new refresh
+        token becomes the newest one: it is used for the next refresh and pushed to the refresh-token listeners
+        (persistence), exactly like a rotated one.  Returns ``{access_token, refresh_token, expires_in,
+        user_id, scope}`` (``refresh_token`` is None when the app lacks the ``offline_access`` scope).
+        Raises :class:`CollectorNotConfigured` without client_id/client_secret, :class:`CollectorError`
+        otherwise.  Never logs the code or the tokens.
+        """
+        if not self._has_app_credentials():
+            raise CollectorNotConfigured(
+                "exchanging an authorization code needs FLIPRADAR_ML_CLIENT_ID and FLIPRADAR_ML_CLIENT_SECRET"
+            )
+        code = (code or "").strip()
+        redirect_uri = (redirect_uri or "").strip()
+        if not code or len(code) > 512 or any(ch.isspace() for ch in code):
+            raise CollectorError("invalid authorization code (paste only the value of the 'code' parameter)")
+        if not redirect_uri or len(redirect_uri) > 1000:
+            raise CollectorError(
+                "redirect_uri is required and must be exactly the redirect URI registered for the app"
+            )
+        form = {
+            "grant_type": "authorization_code",
+            "client_id": str(self.settings.ml_client_id),
+            "client_secret": str(self.settings.ml_client_secret),
+            "code": code,
+            "redirect_uri": redirect_uri,
+        }
+        verifier = (code_verifier or "").strip()
+        if verifier:
+            form["code_verifier"] = verifier
+        key = _state_key(self.settings)
+        state = _state_for(self.settings)
+        async with _lock_for(key):
+            payload = await self._token_request(form)
+            access_token = self._apply_token(state, payload, "authorization_code", None)
+        refresh = payload.get("refresh_token")
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh if isinstance(refresh, str) and refresh else None,
+            "expires_in": _int_or_none(payload.get("expires_in")),
+            "user_id": _str_or_none(payload.get("user_id")),
+            "scope": _str_or_none(payload.get("scope")),
+        }
+
     # -- HTTP ----------------------------------------------------------------------------------
     async def _get_json(
         self,
@@ -614,6 +772,134 @@ class MercadoLibreCollector(Collector):
             raise CollectorError(f"Mercado Libre /products/{product_id}/items returned an unexpected shape")
         return [r for r in results if isinstance(r, dict)]
 
+    async def get_catalog_product(self, product_id: str) -> dict[str, Any] | None:
+        """Catalog product details (``GET /products/{id}``: name, attributes, pictures, domain); None on 404."""
+        if not _SAFE_PATH_ID.match(product_id or ""):
+            raise CollectorError(f"invalid catalog product id {product_id!r}")
+        data = await self._get_json(f"/products/{product_id}", allow_404=True)
+        if data is None:
+            return None
+        if not isinstance(data, dict) or not _str_or_none(data.get("name")):
+            raise CollectorError(f"Mercado Libre /products/{product_id} returned an unexpected shape")
+        return data
+
+    async def get_all_product_items(
+        self, product_id: str, *, max_pages: int = MAX_REFRESH_PAGES
+    ) -> tuple[list[dict[str, Any]] | None, bool]:
+        """Every listing of a catalog product, following ``paging`` (``offset``/``limit``) for up to
+        ``max_pages`` pages.  Returns ``(items, complete)``: items is None on HTTP 404 (no active listings,
+        complete); ``complete`` is True only when ``paging.total`` is reported and covered and every result
+        carried an item id.  Raises CollectorError (MercadoLibrePolicyError) on failure."""
+        if not _SAFE_PATH_ID.match(product_id or ""):
+            raise CollectorError(f"invalid catalog product id {product_id!r}")
+        path = f"/products/{product_id}/items"
+        data = await self._get_json(path, allow_404=True)
+        if data is None:
+            return None, True
+        items: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        offset = 0
+        pages = 0
+        unidentified = False
+        while True:
+            results = data.get("results") if isinstance(data, dict) else None
+            if not isinstance(results, list):
+                raise CollectorError(f"Mercado Libre {path} returned an unexpected shape")
+            pages += 1
+            offset += len(results)
+            added = 0
+            for result in results:
+                if not isinstance(result, dict):
+                    unidentified = True
+                    continue
+                item_id = _item_id(result)
+                if item_id is None:
+                    unidentified = True
+                elif item_id in seen:
+                    continue
+                else:
+                    seen.add(item_id)
+                items.append(result)
+                added += 1
+            total, page_limit = _paging(data)
+            if total is None:
+                return items, False  # completeness cannot be verified
+            if offset >= total or len(seen) >= total:
+                return items, not unidentified and len(seen) >= total
+            if added == 0 or not results or pages >= max(1, max_pages):
+                return items, False
+            data = await self._get_json(
+                path, {"offset": str(offset), "limit": str(page_limit or len(results))}, allow_404=True
+            )
+            if data is None:
+                return items, False
+
+    async def refresh_catalog_products(
+        self,
+        product_ids: Iterable[str],
+        *,
+        products: Mapping[str, dict[str, Any]] | None = None,
+        known_sellers: Mapping[str, dict[str, Any]] | None = None,
+        max_pages: int = MAX_REFRESH_PAGES,
+    ) -> list[CatalogRefresh]:
+        """Re-poll ``/products/{id}/items`` for already tracked catalog products (one result per distinct id,
+        in order).
+
+        ``products`` may supply each product's catalog fields (see :func:`catalog_product_hint`); a product
+        that has listings but no hint is read with ``GET /products/{id}``.  ``known_sellers`` (seller id ->
+        stored reputation dict) is reused instead of looked up again, so a refresh never drops seller data;
+        unknown sellers are looked up as in :meth:`search`.  A failure is recorded on that product and the
+        others continue; after a PolicyAgent denial the remaining products are not requested.
+        """
+        if not self.is_configured():
+            await self._access_token()  # raises CollectorNotConfigured with instructions
+        self.last_warnings = []
+        for seller_id, info in (known_sellers or {}).items():
+            if isinstance(info, dict) and info and str(seller_id) not in self._seller_cache:
+                self._seller_cache[str(seller_id)] = dict(info)
+        hints = products or {}
+        observed_at = datetime.now(UTC)
+        out: list[CatalogRefresh] = []
+        blocked: str | None = None
+        skipped = 0
+        for product_id in dict.fromkeys(str(p).strip() for p in product_ids if p is not None and str(p).strip()):
+            entry = CatalogRefresh(product_id=product_id)
+            out.append(entry)
+            if blocked is not None:
+                entry.error = blocked
+                continue
+            try:
+                items, complete = await self.get_all_product_items(product_id, max_pages=max_pages)
+                product: dict[str, Any] | None = None
+                if items:
+                    product = hints.get(product_id) or await self.get_catalog_product(product_id)
+                    if product is None:
+                        raise CollectorError(f"catalog product {product_id} not found (HTTP 404) but it has listings")
+            except MercadoLibrePolicyError as exc:
+                blocked = entry.error = str(exc)
+                continue
+            except CollectorError as exc:
+                entry.error = str(exc) or type(exc).__name__
+                continue
+            entry.ok, entry.complete = True, complete
+            if product is not None:
+                product = {**product, "id": product_id}  # the items are attached to the product polled
+            for item in items or []:
+                item_id = _item_id(item)
+                if item_id:
+                    entry.returned_ids.add(item_id)
+                listing = map_catalog_item(item, product or {}, observed_at=observed_at)
+                if listing is None:
+                    skipped += 1
+                    continue
+                entry.listings.append(listing)
+        if skipped:
+            self.last_warnings.append(f"{skipped} listing(s) skipped: missing id, price or currency")
+        listings = [listing for entry in out for listing in entry.listings]
+        if listings and getattr(self.settings, "ml_enrich_sellers", True):
+            await self.enrich_sellers(listings)
+        return out
+
     async def get_seller(self, seller_id: str) -> dict[str, Any] | None:
         """Seller reputation (cached per collector instance); None when unavailable."""
         if seller_id in self._seller_cache:
@@ -629,13 +915,22 @@ class MercadoLibreCollector(Collector):
     async def enrich_sellers(
         self, listings: list[RawListing], *, max_sellers: int = MAX_SELLER_ENRICHMENT
     ) -> int:
-        """Attach reputation data to listings (max ``max_sellers`` distinct sellers).  Returns sellers found."""
+        """Attach reputation data to listings (at most ``max_sellers`` lookups of distinct sellers that are not
+        cached yet; cached sellers - e.g. preloaded by a catalog refresh - cost no request).  Returns sellers
+        found."""
         seller_ids: list[str] = []
         for listing in listings:
             if listing.seller_id and listing.seller_id not in seller_ids:
                 seller_ids.append(listing.seller_id)
         found = 0
-        for seller_id in seller_ids[:max_sellers]:
+        lookups = 0
+        for seller_id in seller_ids:
+            if seller_id in self._seller_cache:
+                found += 1 if self._seller_cache[seller_id] else 0
+                continue
+            if lookups >= max_sellers:
+                continue
+            lookups += 1
             try:
                 info = await self.get_seller(seller_id)
             except MercadoLibrePolicyError:

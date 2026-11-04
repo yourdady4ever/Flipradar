@@ -96,3 +96,23 @@ def test_import_costs_rate_resolution_and_errors(api):
     assert r.json()["duties_mxn_cents"] == 0 and r.json()["customs_value_mxn_cents"] == 68_000
     assert api.post("/api/v1/calculator/import-costs", json={**body, "rule_key": "nope"}).status_code == 422
     assert api.post("/api/v1/calculator/import-costs", json={**body, "usd_mxn_rate": "abc"}).status_code == 422
+
+
+def test_import_costs_formal_import_is_flagged_not_guessed(api):
+    """Above the courier-regime limit duties are not estimated: null, never a guessed 0."""
+    for rule_key in ("courier_usmca", "courier_non_fta"):
+        body = {"item_value_usd_cents": 240_000, "shipping_usd_cents": 20_000, "rule_key": rule_key,
+                "usd_mxn_rate": "18.00"}
+        r = api.post("/api/v1/calculator/import-costs", json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert out["formal_import_required"] is True
+        assert out["duty_rate_bp"] is None and out["duties_mxn_cents"] is None
+        assert out["customs_value_usd_cents"] == 260_000 and out["customs_value_mxn_cents"] == 4_680_000
+        assert any(n.startswith("WARNING") and "formal import" in n for n in out["notes"])
+        assert out == estimate_import_costs(240_000, 20_000, rule_key, Decimal("18.00"), fx_source="provided")
+    # At the limit itself (USD 2,500.00) the courier regime still applies and duties are estimated.
+    at_limit = api.post("/api/v1/calculator/import-costs", json={
+        "item_value_usd_cents": 250_000, "rule_key": "courier_usmca", "usd_mxn_rate": "18.00"}).json()
+    assert at_limit["formal_import_required"] is False and at_limit["duty_rate_bp"] == 1900
+    assert at_limit["duties_mxn_cents"] == 855_000  # 2,500 USD * 18 * 19 % = 8,550.00

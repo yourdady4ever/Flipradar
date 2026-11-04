@@ -1,7 +1,11 @@
 """Business analytics computed from YOUR recorded purchases/sales and stored opportunities.
 
-Everything here is a deterministic aggregation of rows in the database; nothing is estimated.  Buckets
-are calendar periods in UTC.  Demo opportunities/listings are excluded unless ``include_demo_data``;
+Everything here is a deterministic aggregation of rows in the database; nothing is estimated.  Timeseries
+buckets are calendar periods (day / ISO week starting Monday / month) in the LOCAL time zone
+``settings.timezone`` (default ``America/Mexico_City``): a sale recorded at 20:00 in Mexico City on the 3rd
+(02:00 UTC on the 4th) belongs to the 3rd.  Timestamps stay UTC in the database; only the bucketing is
+local.  The summary uses a rolling window (``now - days`` .. ``now``), which is the same instant in every time
+zone.  Demo opportunities/listings are excluded unless ``include_demo_data``;
 opportunities with a critical risk flag (likely scam/replica) are never counted as open/potential profit.
 
 Realized profit = the sales' profit MINUS the cost of stock written off in the period (status
@@ -10,22 +14,24 @@ Realized profit = the sales' profit MINUS the cost of stock written off in the p
 assumed refunded, so its cost leaves inventory without a loss.  Inventory cost is each open item's
 remaining cost (``total cost - cost already carried by its sales``), so sold + remaining == total cost.
 
-Timeseries: the window is extended back to the start of the first bucket, so every point covers its
-whole calendar period (the first one is never partial).  Totals can therefore include a few days more
-than ``/analytics/summary`` for the same ``days``.
+Timeseries: the window is extended back to the start (local midnight) of the first bucket, so every point
+covers its whole calendar period (the first one is never partial).  Totals can therefore include a few days
+more than ``/analytics/summary`` for the same ``days``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..models import (
     CollectionRun,
     InventoryItem,
@@ -41,12 +47,35 @@ from . import settings_store
 from .inventory import OPEN_STATUSES, remaining_cost_cents, total_cost_cents, written_off_cost_cents
 from .timeutil import as_utc, utcnow
 
+log = logging.getLogger(__name__)
+
 OPEN_OPPORTUNITY_STATUSES = (OpportunityStatus.NEW.value, OpportunityStatus.SEEN.value, OpportunityStatus.WATCHING.value)
 AGING_BUCKETS = ("0-7", "8-30", "31-90", "90+")
 
 
 def _half_up(value: Decimal) -> int:
     return int(value.to_integral_value(rounding=ROUND_HALF_UP))
+
+
+def local_timezone(settings: Settings | None = None) -> tzinfo:
+    """The IANA time zone analytics buckets use (``settings.timezone``).  An unknown name (or a system without
+    a time zone database) falls back to UTC with a warning instead of failing every analytics request."""
+    name = (settings or get_settings()).timezone
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("unknown time zone %r (FLIPRADAR_TIMEZONE); analytics buckets fall back to UTC", name)
+        return UTC
+
+
+def local_date(moment: datetime, tz: tzinfo) -> date:
+    """Calendar date of ``moment`` (aware, or naive UTC as stored by SQLite) in ``tz``."""
+    return as_utc(moment).astimezone(tz).date()
+
+
+def local_midnight(day: date, tz: tzinfo) -> datetime:
+    """The UTC instant at which ``day`` starts in ``tz``."""
+    return datetime.combine(day, time.min, tzinfo=tz).astimezone(UTC)
 
 
 def aging_bucket(days: int) -> str:
@@ -187,11 +216,19 @@ def _next(day: date, bucket: Bucket) -> date:
     return date(day.year + (day.month // 12), day.month % 12 + 1, 1)
 
 
-def timeseries(session: Session, days: int = 90, bucket: Bucket = "week", now: datetime | None = None) -> TimeseriesOut:
+def timeseries(
+    session: Session,
+    days: int = 90,
+    bucket: Bucket = "week",
+    now: datetime | None = None,
+    settings: Settings | None = None,
+) -> TimeseriesOut:
+    """Per-period totals in local calendar periods (``settings.timezone``; see the module docstring)."""
     now = as_utc(now or utcnow())
-    first = bucket_start((now - timedelta(days=days)).date(), bucket)
-    start = datetime.combine(first, time.min, tzinfo=UTC)  # whole first period, never a partial bucket
-    last = bucket_start(now.date(), bucket)
+    tz = local_timezone(settings)
+    first = bucket_start(local_date(now - timedelta(days=days), tz), bucket)
+    start = local_midnight(first, tz)  # whole first local period, never a partial bucket
+    last = bucket_start(local_date(now, tz), bucket)
     points: dict[date, dict[str, int]] = {}
     cursor = first
     while cursor <= last:
@@ -199,7 +236,7 @@ def timeseries(session: Session, days: int = 90, bucket: Bucket = "week", now: d
         cursor = _next(cursor, bucket)
 
     for sale in session.scalars(select(Sale).where(Sale.sold_at >= start, Sale.sold_at <= now)):
-        key = bucket_start(as_utc(sale.sold_at).date(), bucket)
+        key = bucket_start(local_date(sale.sold_at, tz), bucket)
         if key in points:
             points[key]["revenue_cents"] += sale.unit_price_cents * sale.quantity
             points[key]["profit_cents"] += sale.profit_cents
@@ -207,11 +244,11 @@ def timeseries(session: Session, days: int = 90, bucket: Bucket = "week", now: d
     for item in session.scalars(
         select(InventoryItem).where(InventoryItem.purchased_at >= start, InventoryItem.purchased_at <= now)
     ):
-        key = bucket_start(as_utc(item.purchased_at).date(), bucket)
+        key = bucket_start(local_date(item.purchased_at, tz), bucket)
         if key in points:
             points[key]["purchases_cents"] += total_cost_cents(item)
     for item in _write_offs(session, start, now):
-        key = bucket_start(as_utc(item.written_off_at).date(), bucket)
+        key = bucket_start(local_date(item.written_off_at, tz), bucket)
         if key in points:
             points[key]["profit_cents"] -= written_off_cost_cents(item)
 

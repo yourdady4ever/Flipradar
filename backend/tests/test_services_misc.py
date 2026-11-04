@@ -78,11 +78,14 @@ def test_import_cost_brackets():
     high = estimate_import_costs(20_000, 0, "courier_usmca", rate)
     assert high["duty_rate_bp"] == 1900 and high["duties_mxn_cents"] == 68_400  # 200 USD*18*19% = 684.00
     formal = estimate_import_costs(300_000, 0, "courier_usmca", rate)
-    assert formal["duty_rate_bp"] == 0 and any(n.startswith("WARNING") for n in formal["notes"])
+    assert formal["duty_rate_bp"] is None and formal["duties_mxn_cents"] is None  # not estimated, never a guessed 0
+    assert formal["formal_import_required"] is True and any(n.startswith("WARNING") for n in formal["notes"])
+    assert formal["customs_value_mxn_cents"] == 5_400_000  # the customs value itself is still reported
     assert select_rule("courier_usmca", 300_000).formal_import_required
     china = estimate_import_costs(10_000, 0, "courier_non_fta", rate)
     assert china["duty_rate_bp"] == 3350 and china["duties_mxn_cents"] == 60_300
     assert select_rule("courier_non_fta", 300_000).formal_import_required
+    assert not any(r["formal_import_required"] for r in (low, mid, high, china))
     for result in (low, mid, high, formal, china):
         assert any("regla 3.7.35" in n for n in result["notes"]) and result["as_of"] and result["source_url"]
     with pytest.raises(KeyError):

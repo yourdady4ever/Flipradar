@@ -16,12 +16,20 @@ Rules
 * Demo data lives in its own product namespace (``demo|`` canonical keys) and is never matched against
   real products, and vice versa.
 * Only ``http(s)`` URLs are stored (a ``javascript:`` URL from a CSV must never reach the dashboard).
+* The normalizer's explanations (``normalize.extract.analyze_listing`` notes: every inference and every
+  reason a listing was not clustered) are stored in ``attributes_json["normalization_notes"]``.
+* Manual assignments (review queue, :func:`assign_listing`) are final: a listing whose ``match_method`` is
+  ``"manual"`` keeps its product (or its deliberate "no product") on every later ingestion; only its
+  observed values (price, status, title...) are updated.  Products created by hand (``manual|`` keys) are
+  never offered to the automatic matcher, so no automatic match can land in them either.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -31,13 +39,16 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
+from .. import normalize as normalize_pkg
 from ..config import Settings
 from ..engine.types import MatchResult, NormalizedAttributes, RawListing
 from ..matching import matcher as matcher_mod
 from ..models import Condition, Listing, ListingStatus, PriceObservation, Product, Source
 from ..money import MAX_CENTS
 from ..normalize import extract as normalize_mod
+from ..schemas import ListingAssignIn, ProductCreateIn
 from . import fx as fx_service
+from .errors import Invalid
 from .jsonutil import jsonable, truncate_json
 from .timeutil import as_utc, utcnow
 
@@ -45,6 +56,10 @@ log = logging.getLogger(__name__)
 
 DEMO_KEY_PREFIX = "demo|"
 DEMO_SOURCE_KEY = "demo"
+MANUAL_KEY_PREFIX = "manual|"
+MANUAL_METHOD = "manual"
+MAX_NOTES = 30
+MAX_NOTE_CHARS = 300
 OBSERVATION_REFRESH = timedelta(hours=6)
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _CONDITIONS = {c.value for c in Condition}
@@ -65,6 +80,14 @@ class IngestStats:
 
 def is_demo_product_key(key: str | None) -> bool:
     return bool(key) and str(key).startswith(DEMO_KEY_PREFIX)
+
+
+def is_manual_product_key(key: str | None) -> bool:
+    """A product created by hand from the review queue (``manual|...`` or ``demo|manual|...``)."""
+    text = str(key or "")
+    if text.startswith(DEMO_KEY_PREFIX):
+        text = text[len(DEMO_KEY_PREFIX):]
+    return text.startswith(MANUAL_KEY_PREFIX)
 
 
 def safe_url(value: str | None, max_len: int = 1000) -> str | None:
@@ -93,17 +116,36 @@ def _product_candidate(product: Product) -> matcher_mod.ProductCandidate:
 
 
 def build_matcher(session: Session, *, demo: bool = False) -> matcher_mod.ProductMatcher:
-    """Matcher seeded with existing products of the same namespace (demo vs real)."""
+    """Matcher seeded with existing products of the same namespace (demo vs real).  Products created by hand
+    are left out: only the user puts listings into them (precision first)."""
     products = session.scalars(select(Product).order_by(Product.id)).all()
-    candidates = [_product_candidate(p) for p in products if is_demo_product_key(p.canonical_key) == demo]
+    candidates = [
+        _product_candidate(p) for p in products
+        if is_demo_product_key(p.canonical_key) == demo and not is_manual_product_key(p.canonical_key)
+    ]
     return matcher_mod.ProductMatcher(candidates)
+
+
+def analyze_raw(raw: RawListing) -> tuple[NormalizedAttributes, list[str] | None]:
+    """Normalized attributes plus the normalizer's notes (None when the notes are not available).
+
+    ``normalize.extract.normalize_listing`` is the documented replacement point for the normalizer (the test
+    suite's fake pipeline swaps it); a replacement is honoured and then no notes are recorded.  The package
+    re-export ``flipradar.normalize.normalize_listing`` is bound when the package is first imported, before
+    anything can replace the module attribute, so it identifies the real normalizer.
+    """
+    if normalize_mod.normalize_listing is not normalize_pkg.normalize_listing:
+        return normalize_mod.normalize_listing(raw), None
+    attrs, notes = normalize_mod.analyze_listing(raw)
+    return attrs, [str(n)[:MAX_NOTE_CHARS] for n in notes[:MAX_NOTES]]
 
 
 def _product_attributes(attrs: NormalizedAttributes) -> dict[str, Any]:
     return jsonable({k: v for k, v in attrs.to_dict().items() if k not in _PRODUCT_ATTR_EXCLUDE})
 
 
-def _listing_attributes(raw: RawListing, attrs: NormalizedAttributes, match: MatchResult) -> dict[str, Any]:
+def _listing_attributes(raw: RawListing, attrs: NormalizedAttributes, match: MatchResult,
+                        notes: list[str] | None = None) -> dict[str, Any]:
     normalized = {
         "storage_gb": attrs.storage_gb,
         "ram_gb": attrs.ram_gb,
@@ -115,6 +157,11 @@ def _listing_attributes(raw: RawListing, attrs: NormalizedAttributes, match: Mat
         "normalized": normalized,
         "match": {"method": match.method, "confidence": match.confidence, "reasons": list(match.reasons or [])[:20]},
     }
+    if notes is not None:
+        data["normalization_notes"] = list(notes)
+    attribution = (raw.attributes or {}).get("attribution") if isinstance(raw.attributes, dict) else None
+    if isinstance(attribution, str) and attribution.strip():
+        data["attribution"] = attribution.strip()[:300]  # licence credit the source requires (e.g. CC-BY)
     if raw.category_name:
         data["category_name"] = str(raw.category_name)[:200]
     if raw.attributes:
@@ -243,9 +290,14 @@ def ingest_raw_listings(
             stats.skipped += 1
             stats.errors.append(f"item {index + 1} ({str(raw.external_id)[:40]}): {problem}")
             continue
+        external_id = str(raw.external_id).strip()
+        listing = listings.get(external_id)
+        manual = listing is not None and listing.match_method == MANUAL_METHOD
         try:
-            attrs = normalize_mod.normalize_listing(raw)
-            match = matcher.match(attrs, raw.title)
+            attrs, notes = analyze_raw(raw)
+            # A manual assignment is final: the matcher is not consulted (it could create a cluster).
+            match = (MatchResult(None, 1.0, MANUAL_METHOD, []) if manual
+                     else matcher.match(attrs, raw.title))
         except NotImplementedError:
             raise
         except Exception as exc:  # one malformed listing must not abort a whole batch
@@ -254,8 +306,7 @@ def ingest_raw_listings(
             stats.errors.append(f"item {index + 1} ({str(raw.external_id)[:40]}): normalization failed")
             continue
 
-        product = _resolve_product(session, matcher, products, match, attrs, raw, is_demo)
-        external_id = str(raw.external_id).strip()
+        product = None if manual else _resolve_product(session, matcher, products, match, attrs, raw, is_demo)
         observed_at = as_utc(raw.observed_at) if raw.observed_at else now
         currency = raw.currency.upper()
         rate, fx_source = fx_service.rate_for_currency(currency, usd_rate)
@@ -264,7 +315,6 @@ def ingest_raw_listings(
         available = _non_negative(raw.available_quantity)
         sold = _non_negative(raw.sold_quantity)
 
-        listing = listings.get(external_id)
         is_new = listing is None
         if is_new:
             listing = Listing(source_id=source.id, external_id=external_id, first_seen_at=observed_at,
@@ -300,7 +350,10 @@ def ingest_raw_listings(
             listing.category = attrs.category
             listing.source_category_id = (str(raw.category_id)[:64] if raw.category_id else None)
             listing.gtin = (attrs.gtin or None)
-            listing.attributes_json = _listing_attributes(raw, attrs, match)
+            previous_match = (listing.attributes_json or {}).get("match") if manual else None
+            listing.attributes_json = _listing_attributes(raw, attrs, match, notes)
+            if manual and isinstance(previous_match, dict):
+                listing.attributes_json = {**listing.attributes_json, "match": previous_match}
             listing.seller_id = (str(raw.seller_id)[:64] if raw.seller_id else None)
             listing.seller_name = (str(raw.seller_name)[:200] if raw.seller_name else None)
             listing.seller_json = truncate_json(dict(raw.seller or {}), max_bytes=4_000, max_field_bytes=1_000)
@@ -313,9 +366,10 @@ def ingest_raw_listings(
             listing.is_accessory = bool(attrs.is_accessory)
             listing.is_bundle = bool(attrs.is_bundle)
             listing.status = status
-            listing.product_id = product.id if product is not None else None
-            listing.match_confidence = float(match.confidence) if product is not None else None
-            listing.match_method = (match.method or "none")[:32]
+            if not manual:  # a manual assignment keeps its product, confidence and method
+                listing.product_id = product.id if product is not None else None
+                listing.match_confidence = float(match.confidence) if product is not None else None
+                listing.match_method = (match.method or "none")[:32]
             listing.last_seen_at = observed_at
             listing.raw_json = truncate_json(dict(raw.raw or {}))
             if is_demo:
@@ -417,6 +471,104 @@ def _resolve_product(
             product.gtin = attrs.gtin
     cache[key] = product
     return product
+
+
+# ------------------------------------------------------------------------------------------------
+# Manual assignment (review queue)
+# ------------------------------------------------------------------------------------------------
+
+
+def manual_slug(title: str, max_len: int = 80) -> str:
+    """``"Consola PS5 Slim 1 TB (estándar)"`` -> ``"consola-ps5-slim-1-tb-estandar"`` (ASCII, never empty)."""
+    folded = unicodedata.normalize("NFKD", title or "").encode("ascii", "ignore").decode("ascii").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", folded).strip("-")[:max_len].strip("-")
+    return slug or "product"
+
+
+def create_manual_product(session: Session, spec: ProductCreateIn, *, demo: bool = False) -> Product:
+    """Create a product cluster by hand.  Its key ``manual|<slug>|<id>`` is unique (the id is the product's own)
+    and lives in the demo namespace (``demo|manual|...``) for demo listings.  Flushes."""
+    prefix = (DEMO_KEY_PREFIX if demo else "") + MANUAL_KEY_PREFIX
+    slug = manual_slug(spec.title)
+    title = clean_title(spec.title, 300)
+    if demo and not title.startswith("[DEMO]"):
+        title = ("[DEMO] " + title)[:300]
+    product = Product(
+        canonical_key=f"{prefix}{slug}|pending-{uuid.uuid4().hex}",  # replaced by the id below
+        title=title,
+        brand=(spec.brand or "").strip() or None,
+        model=(spec.model or "").strip() or None,
+        category=((spec.category or "").strip().lower() or None),
+        gtin=None,
+        attributes_json=jsonable(truncate_json(dict(spec.attributes or {}), max_bytes=4_000, max_field_bytes=500)),
+    )
+    session.add(product)
+    session.flush()
+    product.canonical_key = f"{prefix}{slug}|{product.id}"
+    session.flush()
+    return product
+
+
+def assign_listing(session: Session, listing: Listing, body: ListingAssignIn, *,
+                   now: datetime | None = None) -> set[int]:
+    """Assign ``listing`` by hand (review queue).  Exactly one of ``product_id`` (an existing product),
+    ``new_product`` (create one) or ``unassign`` (no product).  Records ``match_method="manual"`` with
+    confidence 1.0, which automatic matching never overwrites.  Demo listings only go to demo products and real
+    listings only to real ones.  Returns the ids of the products whose analysis changed (previous and new
+    product) so the caller can recompute them.  Flushes; the caller commits.
+
+    Raises :class:`~flipradar.services.errors.Invalid` for an invalid request.
+    """
+    chosen = sum((body.product_id is not None, body.new_product is not None, bool(body.unassign)))
+    if chosen != 1:
+        raise Invalid("give exactly one of product_id, new_product or unassign")
+    now = as_utc(now or utcnow())
+    demo = bool(listing.is_demo)
+    previous_id = listing.product_id
+    product: Product | None = None
+    if body.product_id is not None:
+        product = session.get(Product, body.product_id)
+        if product is None:
+            raise Invalid(f"product {body.product_id} not found")
+        if is_demo_product_key(product.canonical_key) != demo:
+            raise Invalid("demo listings can only be assigned to demo products, and real listings to real products")
+    elif body.new_product is not None:
+        product = create_manual_product(session, body.new_product, demo=demo)
+
+    when = now.strftime("%Y-%m-%d %H:%M UTC")
+    if product is not None:
+        reason = f"assigned by hand to product {product.id} ('{product.title[:120]}') on {when}"
+    else:
+        reason = f"removed from its product by hand (no product) on {when}"
+    attributes = dict(listing.attributes_json or {})
+    previous_match = attributes.get("match")
+    if isinstance(previous_match, dict) and previous_match.get("method") != MANUAL_METHOD:
+        attributes["automatic_match"] = previous_match  # what the matcher had decided, for the audit trail
+    attributes["match"] = {"method": MANUAL_METHOD, "confidence": 1.0, "reasons": [reason]}
+    listing.attributes_json = jsonable(attributes)
+    listing.product_id = product.id if product is not None else None
+    listing.match_method = MANUAL_METHOD
+    listing.match_confidence = 1.0
+    if product is None:
+        _refresh_unclustered_risk(listing, now)
+    session.flush()
+    return {pid for pid in (previous_id, listing.product_id) if pid is not None}
+
+
+def _refresh_unclustered_risk(listing: Listing, now: datetime) -> None:
+    """Risk flags of a listing that no longer belongs to any product: the flags that need no comparables
+    (wording, seller, shipping...).  Flags computed against the previous product's prices no longer apply."""
+    from ..engine import risk as risk_engine  # local imports: analysis imports this module
+    from . import analysis
+
+    view = analysis.listing_view(listing, None, now)
+    if view is None:
+        listing.risk_flags_json = []
+        listing.is_suspicious = False
+        return
+    flags = risk_engine.assess_listing(view, None)
+    listing.risk_flags_json = [jsonable(f.to_dict()) for f in flags]
+    listing.is_suspicious = risk_engine.is_suspicious(flags)
 
 
 def to_decimal_rate(value: float | None) -> Decimal | None:
