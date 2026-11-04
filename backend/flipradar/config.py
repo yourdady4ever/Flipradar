@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_timeout_seconds: float = 60.0
 
+    # --- presentation -------------------------------------------------------------------------------
+    # IANA time zone used for analytics day/week/month buckets (sales in the evening in Mexico belong
+    # to that local day, not to the next UTC day).
+    timezone: str = "America/Mexico_City"
+
+    # --- marketplace fee cache --------------------------------------------------------------------
+    # Days before a cached per-category marketplace commission (category_fees) is refreshed.
+    category_fee_ttl_days: int = 7
+
     @field_validator("trusted_proxies")
     @classmethod
     def _check_trusted_proxies(cls, value: str) -> str:

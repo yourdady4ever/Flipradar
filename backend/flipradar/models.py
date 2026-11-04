@@ -461,6 +461,26 @@ class ApiToken(Base):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class CategoryFee(Base):
+    """Exact marketplace commission per category, fetched from the marketplace API (e.g. Mercado Libre
+    ``/sites/MLM/listing_prices``) and cached.  Used by analysis to replace a fee profile's generic
+    commission with the real per-category rate.  Rows are refreshed when older than the cache TTL."""
+
+    __tablename__ = "category_fees"
+    __table_args__ = (UniqueConstraint("source_key", "category_id", "listing_type_id", name="uq_category_fee"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(64))  # e.g. "mercadolibre"
+    category_id: Mapped[str] = mapped_column(String(64))  # e.g. "MLM1055"
+    category_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    listing_type_id: Mapped[str] = mapped_column(String(32))  # gold_special (Clasica) | gold_pro (Premium)
+    commission_bp: Mapped[int] = mapped_column(Integer)
+    sample_price_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sample_fixed_fee_cents: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    raw_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class AppSetting(Base):
     __tablename__ = "app_settings"
 

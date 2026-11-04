@@ -198,6 +198,23 @@ class ListingOut(ORMModel):
     last_seen_at: datetime
 
 
+class ProductCreateIn(BaseModel):
+    title: str = Field(min_length=2, max_length=300)
+    brand: str | None = Field(default=None, max_length=80)
+    model: str | None = Field(default=None, max_length=120)
+    category: str | None = Field(default=None, max_length=80)
+    attributes: dict[str, Any] = {}
+
+
+class ListingAssignIn(BaseModel):
+    """Manual product assignment from the review queue.  Exactly one of ``product_id`` / ``new_product``
+    / ``unassign`` must be given.  Manual assignments are never overwritten by automatic matching."""
+
+    product_id: int | None = Field(default=None, ge=1, le=2**31 - 1)
+    new_product: ProductCreateIn | None = None
+    unassign: bool = False
+
+
 class PriceObservationOut(ORMModel):
     observed_at: datetime
     price_cents: int
@@ -431,9 +448,10 @@ class ImportCostOut(BaseModel):
     customs_value_usd_cents: int
     usd_mxn_rate: str
     fx_source: str
-    duty_rate_bp: int
-    duties_mxn_cents: int
+    duty_rate_bp: int | None  # None when duties are not estimated (formal import required)
+    duties_mxn_cents: int | None  # None when duties are not estimated (formal import required)
     customs_value_mxn_cents: int
+    formal_import_required: bool = False
     notes: list[str]
     source_url: str | None
     as_of: str | None
@@ -667,6 +685,16 @@ class SettingsOut(BaseModel):
     pricing_strategy: Literal["competitive", "market"]
     unknown_shipping_assumption_cents: int | None
     buy_max_age_days: int = 3  # buy listings not seen within this many days never become opportunities
+    # Same, for listings you entered yourself (manual / CSV import); they are not re-collected.
+    manual_buy_max_age_days: int = 30
+    # Resale fee profile by FLIP RADAR category and condition class, e.g.
+    # {"console": {"new": "ml_clasica_1_2kg", "used": "ml_clasica_used_1_2kg"}}; categories not listed
+    # use default_fee_profile_key / default_fee_profile_key_used.
+    category_fee_profiles: dict[str, dict[str, str]] = {}
+    # Use cached exact Mercado Libre per-category commissions (category_fees table) when available.
+    use_marketplace_category_fees: bool = True
+    # Treat your own recorded sales as sold-price evidence for the same product.
+    use_own_sales_as_evidence: bool = True
     fx_usd_mxn_manual: str | None
     include_demo_data: bool
     ai_provider: str
@@ -684,6 +712,10 @@ class SettingsUpdate(BaseModel):
     pricing_strategy: Literal["competitive", "market"] | None = None
     unknown_shipping_assumption_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     buy_max_age_days: int | None = Field(default=None, ge=1, le=90)
+    manual_buy_max_age_days: int | None = Field(default=None, ge=1, le=365)
+    category_fee_profiles: dict[str, dict[str, str]] | None = None
+    use_marketplace_category_fees: bool | None = None
+    use_own_sales_as_evidence: bool | None = None
     fx_usd_mxn_manual: str | None = None
     include_demo_data: bool | None = None
 
